@@ -1,32 +1,45 @@
-from func import get_trading_pairs, get_bybit_last_kline_data, calculate_profit
+import asyncio
+import logging
+from func import BybitAPI, calculate_profit
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-try:
+async def main():
+    api = BybitAPI()
+    count = 1
+    money = 10
+    try:
+        await api.start()
+        while True:
+            try:
+                trading_pairs = await api.get_trading_pairs()
+                for base, pairs in trading_pairs.items():
+                    for pair in pairs:
+                        result = await api.process_pair(pair, base)
+                        if result:
+                            if calculate_profit(*result) > 0.3:
+                                logger.info(f"Transaction No.: {count}")
+                                logger.info(f"Pair: {pair}")
+                                calc = calculate_profit(*result)
+                                logger.info(f"Profit: {calc}%")
+                                money += money * (0.01 * calc)
+                                logger.info(f"Money: {money}")
+                                count += 1
 
-    while True:
-        for base, list_pairs in get_trading_pairs().items():
-            for pair in list_pairs:
-                print(pair)
-                num_list = []
-                for trade_pair in pair:
-                    if base in ['USDT', 'SOL', 'BTC', 'ETH']:
-                        try:
-                            ab = get_bybit_last_kline_data(trade_pair)
-                        except Exception as e:
-                            print(e)
-                            continue
-                    else:
-                        ab = get_bybit_last_kline_data(trade_pair)
-                    num_list.append(ab)
-                try:
-                    a, b, c = num_list
-                    num_list.append(calculate_profit(a, b, c))
-                except Exception as e:
-                    print(e)
-                    continue
-                print(num_list)
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                await asyncio.sleep(5)
+    except KeyboardInterrupt:
+        logger.info("Stopping...")
+    finally:
+        await api.close()
 
 
-except Exception as e:
-    print(e)
-
+if __name__ == "__main__":
+    asyncio.run(main())
