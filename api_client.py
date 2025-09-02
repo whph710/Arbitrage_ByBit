@@ -2,11 +2,14 @@ import aiohttp
 import asyncio
 import logging
 import time
+import hmac
+import hashlib
 from typing import Dict, List, Tuple, Optional, Set
 from models import OrderBookData, TradeDirection
 from config import *
 
 logger = logging.getLogger(__name__)
+
 
 class BybitAPIClient:
     def __init__(self):
@@ -19,18 +22,58 @@ class BybitAPIClient:
         self._http_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         self._shutdown_event = asyncio.Event()
 
+        # API аутентификация
+        self.api_key = API_KEY
+        self.api_secret = API_SECRET
+        self.base_url = TESTNET_BASE_URL if API_TESTNET else BYBIT_BASE_URL
+
+        # Проверка настроек API
+        if self.api_key and self.api_secret:
+            logger.info("API ключи настроены для аутентификации")
+        else:
+            logger.warning("API ключи не настроены - доступны только публичные методы")
+
     async def start(self):
         if not self.session:
             timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
             connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS, ssl=SSL_VERIFY)
             self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        logger.info("API клиент запущен")
+        logger.info(f"API клиент запущен (URL: {self.base_url})")
 
     async def close(self):
         if self.session:
             await self.session.close()
             self.session = None
         logger.info("API клиент остановлен")
+
+    def _generate_signature(self, timestamp: str, params: str = "") -> str:
+        """Генерирует подпись для аутентифицированных запросов"""
+        if not self.api_secret:
+            return ""
+
+        param_str = timestamp + self.api_key + "5000" + params  # 5000 = recv_window
+        return hmac.new(
+            bytes(self.api_secret, 'utf-8'),
+            param_str.encode('utf-8'),
+            digestmod=hashlib.sha256
+        ).hexdigest()
+
+    def _get_auth_headers(self, params: str = "") -> Dict[str, str]:
+        """Возвращает заголовки для аутентификации"""
+        if not self.api_key or not self.api_secret:
+            return {}
+
+        timestamp = str(int(time.time() * 1000))
+        signature = self._generate_signature(timestamp, params)
+
+        return {
+            "X-BAPI-API-KEY": self.api_key,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-SIGN-TYPE": "2",
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/json"
+        }
 
     async def _acquire_rate_slot(self):
         async with self._rate_lock:
@@ -43,7 +86,7 @@ class BybitAPIClient:
             self._rate_window.append(now)
 
     async def get_tickers(self) -> Set[str]:
-        url = f"{BYBIT_BASE_URL}/market/tickers"
+        url = f"{self.base_url}/market/tickers"
         params = {"category": "spot"}
         for attempt in range(API_RETRY_ATTEMPTS):
             try:
@@ -76,7 +119,8 @@ class BybitAPIClient:
     def _filter_tickers(self, tickers: List[str]) -> List[str]:
         filtered = []
         for ticker in tickers:
-            excluded = any(exc == ticker or ticker.endswith(exc) or ticker.startswith(exc) for exc in EXCLUDED_CURRENCIES)
+            excluded = any(
+                exc == ticker or ticker.endswith(exc) or ticker.startswith(exc) for exc in EXCLUDED_CURRENCIES)
             if excluded:
                 continue
             base_currency_found = any(ticker.endswith(base) for base in CROSS_CURRENCIES)
@@ -92,7 +136,8 @@ class BybitAPIClient:
             data, timestamp = self.orderbook_cache[symbol]
             if time.time() - timestamp < ORDERBOOK_CACHE_TTL:
                 return data
-        url = f"{BYBIT_BASE_URL}/market/orderbook"
+
+        url = f"{self.base_url}/market/orderbook"
         params = {
             "category": "spot",
             "symbol": symbol,
@@ -126,6 +171,76 @@ class BybitAPIClient:
             raise
         except Exception as e:
             logger.debug(f"Ошибка получения стакана для {symbol}: {e}")
+            return None
+
+    async def get_account_balance(self) -> Optional[Dict]:
+        """Получает баланс аккаунта (требует аутентификации)"""
+        if not self.api_key or not self.api_secret:
+            logger.warning("Получение баланса недоступно - API ключи не настроены")
+            return None
+
+        url = f"{self.base_url}/account/wallet-balance"
+        params = "accountType=SPOT"
+        headers = self._get_auth_headers(params)
+
+        try:
+            await self._acquire_rate_slot()
+            async with self._http_semaphore:
+                async with self.session.get(
+                        f"{url}?{params}",
+                        headers=headers
+                ) as response:
+                    if response.status != 200:
+                        logger.error(f"Ошибка получения баланса: статус {response.status}")
+                        return None
+                    data = await response.json()
+                    if data.get("retCode") != 0:
+                        logger.error(f"API ошибка получения баланса: {data.get('retMsg')}")
+                        return None
+                    return data.get("result")
+        except Exception as e:
+            logger.error(f"Исключение при получении баланса: {e}")
+            return None
+
+    async def place_order(self, symbol: str, side: str, qty: str, price: str = None) -> Optional[Dict]:
+        """Размещает ордер (требует аутентификации)"""
+        if not self.api_key or not self.api_secret:
+            logger.error("Размещение ордера недоступно - API ключи не настроены")
+            return None
+
+        url = f"{self.base_url}/order/create"
+
+        order_data = {
+            "category": "spot",
+            "symbol": symbol,
+            "side": side.capitalize(),  # Buy/Sell
+            "orderType": "Market" if not price else "Limit",
+            "qty": qty
+        }
+
+        if price:
+            order_data["price"] = price
+
+        import json
+        params = json.dumps(order_data, separators=(',', ':'))
+        headers = self._get_auth_headers(params)
+
+        try:
+            await self._acquire_rate_slot()
+            async with self._http_semaphore:
+                async with self.session.post(
+                        url,
+                        data=params,
+                        headers=headers
+                ) as response:
+                    data = await response.json()
+                    if data.get("retCode") != 0:
+                        logger.error(f"Ошибка размещения ордера: {data.get('retMsg')}")
+                        return None
+                    logger.info(f"Ордер размещен: {symbol} {side} {qty}")
+                    return data.get("result")
+        except Exception as e:
+            logger.error(f"Исключение при размещении ордера: {e}")
             return None
 
     async def close_session(self):

@@ -1,110 +1,141 @@
 # config.py — Конфигурационные настройки для арбитражного бота Bybit
 # =============================================================================
+import os
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения из файла .env
+load_dotenv()
+
+# =============================================================================
 # ОСНОВНЫЕ НАСТРОЙКИ ТОРГОВЛИ
 # =============================================================================
-MIN_PROFIT_THRESHOLD = 0.001    # Минимальный порог прибыли для арбитража в процентах (0.001 = 0.1%)
-TRADING_COMMISSION = 0.001       # Комиссия за торговлю (0.1% = 0.001)
-INITIAL_AMOUNT = 5000.0          # Начальный капитал для оценки исполнимости арбитража в USDT
+MIN_PROFIT_THRESHOLD = 0.001  # Минимальный порог прибыли для арбитража в процентах (0.001 = 0.1%)
+TRADING_COMMISSION = 0.001  # Комиссия за торговлю (0.1% = 0.001)
+INITIAL_AMOUNT = 5000.0  # Начальный капитал для оценки исполнимости арбитража в USDT
 MAX_OPPORTUNITIES_DISPLAY = 50  # Максимальное количество арбитражных возможностей, отображаемых за один раз
 
 # =============================================================================
 # НАСТРОЙКИ API И ПОДКЛЮЧЕНИЯ
 # =============================================================================
 BYBIT_BASE_URL = "https://api.bybit.com/v5"  # Базовый URL API Bybit
-HTTP_TIMEOUT = 6               # Таймаут для HTTP-запросов в секундах
-API_RETRY_ATTEMPTS = 8         # Количество попыток повторного выполнения запроса при ошибке
-API_RETRY_DELAY = 0.2          # Задержка между повторными попытками запроса в секундах
+HTTP_TIMEOUT = 6
+API_RETRY_ATTEMPTS = 8
+API_RETRY_DELAY = 0.2
+
+# =============================================================================
+# НАСТРОЙКИ API КЛЮЧЕЙ ДЛЯ РЕАЛЬНОЙ ТОРГОВЛИ
+# =============================================================================
+# Ключи загружаются из файла .env
+API_KEY = os.getenv("API_KEY")
+API_SECRET = os.getenv("API_SECRET")
+
+API_TESTNET = False
+TESTNET_BASE_URL = "https://api-testnet.bybit.com/v5"
 
 # =============================================================================
 # НАСТРОЙКИ ВРЕМЕННЫХ ИНТЕРВАЛОВ
 # =============================================================================
-SCAN_INTERVAL = 0.5            # Интервал сканирования рынка в секундах (0.5 сек = 2 сканирования в секунду)
-ERROR_RETRY_INTERVAL = 1       # Интервал повторной попытки после ошибки в секундах
-ORDERBOOK_TIMEOUT = 4          # Таймаут для загрузки стакана заявок в секундах
+SCAN_INTERVAL = 0.5
+ERROR_RETRY_INTERVAL = 1
+ORDERBOOK_TIMEOUT = 4
 
 # =============================================================================
 # НАСТРОЙКИ ВАЛЮТНЫХ ПАР — МАКСИМУМ
 # =============================================================================
 CROSS_CURRENCIES = [
-    # стабильные / крупные
-    'USDT','USDC','BUSD','DAI','USD','TUSD',
-    # крупные альткоины
-    'BTC','ETH','BNB','SOL','ADA','XRP','LTC','DOGE','MATIC','TRX','AVAX','DOT','LINK','ATOM',
-    'NEAR','FTM','XLM','EOS','ICP','XTZ','AAVE','SUSHI','UNI','ZEC','BAT','CHZ','KSM','RUNE',
-    'ALGO','VET','KLAY','HNT','ONT','MANA','GRT','CELO','OKB','XTZ','NANO','QTUM','DASH','ZIL',
-    # менее ликвидные — включены целенаправленно для максимума
-    'ANKR','ANK','IOST','ENJ','SC','WAVES','ZRX','RVN','HBAR','COMP','SNX','BTT','ICX','STORJ',
-    'DCR','KNC','LRC','RVN','ONE','GALA','MINA','AR','CHSB','KAVA','SUSHI','RAY','SRM','STEEM',
-    # экспериментальные / memecoins — существенно увеличивают покрытие (высокий риск)
-    'SHIB','PEPE','FLOKI','ELON','TAMA','BABYDOGE','WIF'
+    'USDT', 'USDC', 'BUSD', 'DAI', 'USD', 'TUSD',
+    'BTC', 'ETH', 'BNB', 'SOL', 'ADA', 'XRP', 'LTC', 'DOGE', 'MATIC', 'TRX', 'AVAX', 'DOT', 'LINK', 'ATOM',
+    'NEAR', 'FTM', 'XLM', 'EOS', 'ICP', 'XTZ', 'AAVE', 'SUSHI', 'UNI', 'ZEC', 'BAT', 'CHZ', 'KSM', 'RUNE',
+    'ALGO', 'VET', 'KLAY', 'HNT', 'ONT', 'MANA', 'GRT', 'CELO', 'OKB', 'XTZ', 'NANO', 'QTUM', 'DASH', 'ZIL',
+    'ANKR', 'ANK', 'IOST', 'ENJ', 'SC', 'WAVES', 'ZRX', 'RVN', 'HBAR', 'COMP', 'SNX', 'BTT', 'ICX', 'STORJ',
+    'DCR', 'KNC', 'LRC', 'RVN', 'ONE', 'GALA', 'MINA', 'AR', 'CHSB', 'KAVA', 'SUSHI', 'RAY', 'SRM', 'STEEM',
+    'SHIB', 'PEPE', 'FLOKI', 'ELON', 'TAMA', 'BABYDOGE', 'WIF'
 ]
-EXCLUDED_CURRENCIES = []         # Список валютных пар, которые необходимо исключить из рассмотрения
-MIN_LIQUIDITY_VOLUME = 10        # Минимальный объем ликвидности для рассмотрения пары (в USDT)
+EXCLUDED_CURRENCIES = []
+MIN_LIQUIDITY_VOLUME = 10
 
 # =============================================================================
 # НАСТРОЙКИ ЛОГИРОВАНИЯ
 # =============================================================================
-LOG_LEVEL = "DEBUG"              # Уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"  # Формат логов
-LOG_FILE = "arbitrage_max_aggressive.log"  # Имя файла для логирования
-LOG_MAX_SIZE = 200 * 1024 * 1024  # Максимальный размер лог-файла в байтах (200MB)
-LOG_BACKUP_COUNT = 20            # Количество резервных копий лог-файла
+LOG_LEVEL = "DEBUG"
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+LOG_FILE = "arbitrage_max_aggressive.log"
+LOG_MAX_SIZE = 200 * 1024 * 1024
+LOG_BACKUP_COUNT = 20
+LOG_ENCODING = "utf-8"
 
 # =============================================================================
 # НАСТРОЙКИ УВЕДОМЛЕНИЙ
 # =============================================================================
-CONSOLE_NOTIFICATIONS = True     # Включение уведомлений в консоли
-SOUND_NOTIFICATIONS = False      # Включение звуковых уведомлений
-SOUND_FILE_PATH = "alert.wav"   # Путь к звуковому файлу для уведомлений
+CONSOLE_NOTIFICATIONS = True
+SOUND_NOTIFICATIONS = False
+SOUND_FILE_PATH = "alert.wav"
 
 # =============================================================================
 # ПРОДВИНУТЫЕ НАСТРОЙКИ
 # =============================================================================
-USE_ORDERBOOK_CACHE = False      # Использование кэша стакана заявок для ускорения работы
-ORDERBOOK_CACHE_TTL = 0          # Время жизни кэша стакана заявок в секундах (0 = отключено)
-MAX_CONCURRENT_REQUESTS = 500    # Максимальное количество одновременных HTTP-запросов
-PERFORMANCE_DIAGNOSTICS = True   # Включение диагностики производительности
+USE_ORDERBOOK_CACHE = False
+ORDERBOOK_CACHE_TTL = 0
+MAX_CONCURRENT_REQUESTS = 500
+PERFORMANCE_DIAGNOSTICS = True
 
 # =============================================================================
 # НАСТРОЙКИ ФИЛЬТРАЦИИ
 # =============================================================================
-FILTER_LOW_LIQUIDITY = False     # Фильтрация пар с низкой ликвидностью
-MAX_SPREAD_PERCENT = 10.0        # Максимальный разрыв между ценой покупки и продажи в процентах
-EXCLUDE_HIGH_VOLATILITY = False  # Исключение пар с высокой волатильностью
-MAX_VOLATILITY_PERCENT = 100.0   # Максимальная волатильность в процентах
+FILTER_LOW_LIQUIDITY = False
+MAX_SPREAD_PERCENT = 10.0
+EXCLUDE_HIGH_VOLATILITY = False
+MAX_VOLATILITY_PERCENT = 100.0
 
 # =============================================================================
 # НАСТРОЙКИ БЕЗОПАСНОСТИ / СЕТИ
 # =============================================================================
-API_RATE_LIMIT = 5000            # Лимит запросов в минуту (очень агрессивно)
-SSL_VERIFY = True                # Проверка SSL-сертификатов
-NETWORK_TIMEOUT = 15             # Таймаут сети в секундах
+API_RATE_LIMIT = 5000
+SSL_VERIFY = True
+NETWORK_TIMEOUT = 15
 
 # =============================================================================
 # ЭКСПЕРИМЕНТАЛЬНЫЕ НАСТРОЙКИ
 # =============================================================================
-EXPERIMENTAL_OPTIMIZATIONS = True  # Включение экспериментальных оптимизаций
-ML_VOLATILITY_PREDICTION = True    # Использование машинного обучения для предсказания волатильности
-ORDERBOOK_DEPTH_ANALYSIS = True    # Анализ глубины стакана заявок
-ORDERBOOK_LEVELS = 50              # Количество уровней стакана заявок для анализа
+EXPERIMENTAL_OPTIMIZATIONS = True
+ML_VOLATILITY_PREDICTION = True
+ORDERBOOK_DEPTH_ANALYSIS = True
+ORDERBOOK_LEVELS = 50
 
 # =============================================================================
 # НАСТРОЙКИ ДЛЯ АВТОНОМНОЙ ТОРГОВЛИ
 # =============================================================================
-ENABLE_LIVE_TRADING = True            # Включение реальной торговли (False по умолчанию)
-LIVE_TRADING_DRY_RUN = False            # Режим тестирования без реальных сделок
-LIVE_TRADING_MAX_TRADE_USDT = 1000.0   # Максимальный размер одной сделки в USDT
-LIVE_TRADING_MAX_EXEC_PER_MIN = 60     # Максимальное количество сделок в минуту
-LIVE_TRADING_ORDER_GAP_SEC = 0.05      # Минимальный интервал между сделками в секундах
-ALLOW_PARTIAL_FILL_EXECUTION = True    # Разрешение частичного исполнения ордеров
-REQUIRE_BALANCE_CHECK_BEFORE_LIVE = True  # Проверка баланса перед реальной торговлей
+ENABLE_LIVE_TRADING = False
+LIVE_TRADING_DRY_RUN = True
+LIVE_TRADING_MAX_TRADE_USDT = 1000.0
+LIVE_TRADING_MAX_EXEC_PER_MIN = 60
+LIVE_TRADING_ORDER_GAP_SEC = 0.05
+ALLOW_PARTIAL_FILL_EXECUTION = True
+REQUIRE_BALANCE_CHECK_BEFORE_LIVE = True
 
 # =============================================================================
 # ДОПОЛНИТЕЛЬНЫЕ ПАРАМЕТРЫ
 # =============================================================================
-SESSION_MAX_DRAWDOWN_PERCENT = 50.0  # Максимальный процент просадки за сессию
-LOG_API_RESPONSES = False             # Логирование ответов API
+SESSION_MAX_DRAWDOWN_PERCENT = 50.0
+LOG_API_RESPONSES = False
 
 # =============================================================================
-# Конец конфигурации
+# ПРОВЕРКА КОНФИГУРАЦИИ
 # =============================================================================
+def validate_config():
+    errors = []
+    warnings = []
+
+    if ENABLE_LIVE_TRADING and not LIVE_TRADING_DRY_RUN:
+        if not API_KEY or not API_SECRET:
+            errors.append("Для реальной торговли необходимы API_KEY и API_SECRET")
+        if API_TESTNET:
+            warnings.append("Включена тестовая сеть (API_TESTNET=True), реальные сделки выполняться не будут")
+
+    if ENABLE_LIVE_TRADING and LIVE_TRADING_MAX_TRADE_USDT > 10000:
+        warnings.append(f"Очень большой размер сделки: {LIVE_TRADING_MAX_TRADE_USDT} USDT")
+
+    if SCAN_INTERVAL < 0.1:
+        warnings.append("Очень короткий интервал сканирования может вызвать превышение лимитов API")
+
+    return errors, warnings
