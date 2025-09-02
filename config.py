@@ -35,7 +35,7 @@ TESTNET_BASE_URL = "https://api-testnet.bybit.com/v5"
 # =============================================================================
 # НАСТРОЙКИ ВРЕМЕННЫХ ИНТЕРВАЛОВ
 # =============================================================================
-SCAN_INTERVAL = 0.5
+SCAN_INTERVAL = 1
 ERROR_RETRY_INTERVAL = 1
 ORDERBOOK_TIMEOUT = 4
 
@@ -52,7 +52,9 @@ CROSS_CURRENCIES = [
     'SHIB', 'PEPE', 'FLOKI', 'ELON', 'TAMA', 'BABYDOGE', 'WIF'
 ]
 EXCLUDED_CURRENCIES = []
-MIN_LIQUIDITY_VOLUME = 10
+
+# ИСПРАВЛЕНО: Увеличиваем минимальную ликвидность для соответствия требованиям биржи
+MIN_LIQUIDITY_VOLUME = 50  # Увеличено с 10 до 50 USDT
 
 # =============================================================================
 # НАСТРОЙКИ ЛОГИРОВАНИЯ
@@ -82,7 +84,7 @@ PERFORMANCE_DIAGNOSTICS = True
 # =============================================================================
 # НАСТРОЙКИ ФИЛЬТРАЦИИ
 # =============================================================================
-FILTER_LOW_LIQUIDITY = False
+FILTER_LOW_LIQUIDITY = True  # ИСПРАВЛЕНО: Включаем фильтрацию низкой ликвидности
 MAX_SPREAD_PERCENT = 10.0
 EXCLUDE_HIGH_VOLATILITY = False
 MAX_VOLATILITY_PERCENT = 100.0
@@ -107,7 +109,11 @@ ORDERBOOK_LEVELS = 50
 # =============================================================================
 ENABLE_LIVE_TRADING = True
 LIVE_TRADING_DRY_RUN = False
-LIVE_TRADING_MAX_TRADE_USDT = 1000.0
+
+# ИСПРАВЛЕНО: Увеличиваем минимальную сумму сделки для соответствия требованиям Bybit
+LIVE_TRADING_MAX_TRADE_USDT = 1000.0  # Максимальная сумма сделки
+LIVE_TRADING_MIN_TRADE_USDT = 5.0     # ДОБАВЛЕНО: Минимальная сумма сделки
+
 LIVE_TRADING_MAX_EXEC_PER_MIN = 60
 LIVE_TRADING_ORDER_GAP_SEC = 0.05
 ALLOW_PARTIAL_FILL_EXECUTION = True
@@ -137,5 +143,12 @@ def validate_config():
 
     if SCAN_INTERVAL < 0.1:
         warnings.append("Очень короткий интервал сканирования может вызвать превышение лимитов API")
+
+    # ДОБАВЛЕНО: Проверка минимальной суммы сделки
+    if LIVE_TRADING_MIN_TRADE_USDT < 5.0:
+        warnings.append("Минимальная сумма сделки может быть слишком мала для Bybit (рекомендуется >= $5)")
+
+    if MIN_LIQUIDITY_VOLUME < LIVE_TRADING_MIN_TRADE_USDT:
+        warnings.append(f"MIN_LIQUIDITY_VOLUME ({MIN_LIQUIDITY_VOLUME}) меньше LIVE_TRADING_MIN_TRADE_USDT ({LIVE_TRADING_MIN_TRADE_USDT})")
 
     return errors, warnings

@@ -22,6 +22,12 @@ class TradingManager:
             logger.debug("Режим реальной торговли отключен")
             return False
 
+        # ИСПРАВЛЕНИЕ: Проверяем минимальную сумму сделки
+        min_trade_amount = getattr(globals(), 'LIVE_TRADING_MIN_TRADE_USDT', 10.0)
+        if opportunity.min_volume_usdt < min_trade_amount:
+            logger.debug(f"Сумма сделки слишком мала: {opportunity.min_volume_usdt:.2f} < {min_trade_amount:.2f} USDT")
+            return False
+
         # Проверка частоты сделок
         if not self._check_trade_limits():
             logger.warning("Превышен лимит частоты сделок")
@@ -123,7 +129,10 @@ class TradingManager:
             first_pair = opportunity.path[0]
             if first_pair.endswith('USDT'):
                 base_currency = 'USDT'
-                required_amount = min(LIVE_TRADING_MAX_TRADE_USDT, opportunity.min_volume_usdt)
+                # ИСПРАВЛЕНИЕ: Учитываем минимальную сумму сделки
+                min_trade_amount = getattr(globals(), 'LIVE_TRADING_MIN_TRADE_USDT', 10.0)
+                required_amount = max(min_trade_amount,
+                                    min(LIVE_TRADING_MAX_TRADE_USDT, opportunity.min_volume_usdt))
             else:
                 # Определяем базовую валюту из первой пары
                 base_currency = None
@@ -136,7 +145,9 @@ class TradingManager:
                     logger.warning(f"Не удалось определить базовую валюту для {first_pair}")
                     return False
 
-                required_amount = opportunity.min_volume_usdt
+                # ИСПРАВЛЕНИЕ: Учитываем минимальную сумму и для других валют
+                min_trade_amount = getattr(globals(), 'LIVE_TRADING_MIN_TRADE_USDT', 10.0)
+                required_amount = max(min_trade_amount, opportunity.min_volume_usdt)
 
             current_balance = balances.get(base_currency, 0)
 
@@ -156,7 +167,10 @@ class TradingManager:
     async def _execute_arbitrage_path(self, opportunity: ArbitrageOpportunity) -> bool:
         """Выполняет последовательность сделок для арбитража"""
         try:
-            trade_amount = min(LIVE_TRADING_MAX_TRADE_USDT, opportunity.min_volume_usdt)
+            # ИСПРАВЛЕНИЕ: Используем минимальную сумму сделки
+            min_trade_amount = getattr(globals(), 'LIVE_TRADING_MIN_TRADE_USDT', 10.0)
+            trade_amount = max(min_trade_amount,
+                             min(LIVE_TRADING_MAX_TRADE_USDT, opportunity.min_volume_usdt))
             current_amount = trade_amount
 
             logger.info(f"🚀 Начинаем арбитраж с суммой {trade_amount} USDT")
@@ -166,21 +180,31 @@ class TradingManager:
             )):
                 logger.info(f"📊 Шаг {i + 1}/3: {pair} - {direction.value.upper()} по цене {price}")
 
-                # Рассчитываем количество для ордера
+                # ИСПРАВЛЕНИЕ: Улучшенный расчет количества для ордера
                 if direction == TradeDirection.BUY:
-                    qty = str(round(current_amount / price, 6))
-                    current_amount = current_amount / price
+                    # При покупке: количество = сумма / цена
+                    raw_qty = current_amount / price
+                    # Округляем до разумного количества знаков
+                    qty = self._format_quantity(raw_qty, pair)
+                    current_amount = raw_qty  # Обновляем текущую сумму
                 else:  # SELL
-                    qty = str(round(current_amount, 6))
-                    current_amount = current_amount * price
+                    # При продаже: используем текущее количество
+                    qty = self._format_quantity(current_amount, pair)
+                    current_amount = current_amount * price  # Обновляем текущую сумму
 
-                logger.info(f"💱 Размещаем ордер: {qty} {pair}")
+                # ИСПРАВЛЕНИЕ: Проверяем минимальный размер ордера
+                order_value = float(qty) * price
+                if order_value < 5.0:  # Bybit требует минимум $5 для большинства пар
+                    logger.warning(f"❌ Размер ордера слишком мал: {order_value:.2f} USDT < 5.0 USDT")
+                    return False
+
+                logger.info(f"💱 Размещаем ордер: {qty} {pair} (стоимость: ${order_value:.2f})")
 
                 # Размещаем рыночный ордер
                 result = await self.api_client.place_order(
                     symbol=pair,
                     side=direction.value,
-                    qty=qty
+                    qty=str(qty)
                 )
 
                 if not result:
@@ -199,6 +223,19 @@ class TradingManager:
         except Exception as e:
             logger.error(f"❌ Ошибка выполнения торгового пути: {e}")
             return False
+
+    def _format_quantity(self, quantity: float, pair: str) -> float:
+        """ДОБАВЛЕНО: Форматирует количество для ордера с учетом требований биржи"""
+        try:
+            # Для большинства пар на Bybit используется 6 знаков после запятой
+            # Но для некоторых популярных монет может быть меньше
+            if any(pair.startswith(prefix) for prefix in ['BTC', 'ETH', 'BNB']):
+                return round(quantity, 6)
+            else:
+                # Для менее популярных токенов может потребоваться больше знаков
+                return round(quantity, 8)
+        except:
+            return round(quantity, 6)
 
     def _log_trade_details(self, opportunity: ArbitrageOpportunity):
         """Логирует детали сделки"""
