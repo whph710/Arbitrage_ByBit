@@ -105,8 +105,8 @@ ORDERBOOK_LEVELS = 50
 # =============================================================================
 # НАСТРОЙКИ ДЛЯ АВТОНОМНОЙ ТОРГОВЛИ
 # =============================================================================
-ENABLE_LIVE_TRADING = False
-LIVE_TRADING_DRY_RUN = True
+ENABLE_LIVE_TRADING = True
+LIVE_TRADING_DRY_RUN = False
 LIVE_TRADING_MAX_TRADE_USDT = 1000.0
 LIVE_TRADING_MAX_EXEC_PER_MIN = 60
 LIVE_TRADING_ORDER_GAP_SEC = 0.05

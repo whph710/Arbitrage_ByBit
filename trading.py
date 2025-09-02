@@ -76,17 +76,48 @@ class TradingManager:
         return True
 
     def _check_sufficient_balance(self, balance_data: Dict, opportunity: ArbitrageOpportunity) -> bool:
-        """Проверяет достаточность баланса для сделки"""
+        """Проверяет достаточность баланса для сделки - ИСПРАВЛЕНО для UNIFIED"""
         try:
-            # Получаем информацию о балансе
+            # Получаем информацию о балансе для UNIFIED аккаунта
             balances = {}
             if balance_data and 'list' in balance_data:
                 for account in balance_data['list']:
-                    if account.get('accountType') == 'SPOT':
+                    if account.get('accountType') == 'UNIFIED':
                         for coin in account.get('coin', []):
                             symbol = coin.get('coin')
-                            free_balance = float(coin.get('free', 0))
-                            balances[symbol] = free_balance
+
+                            # Безопасное извлечение баланса с обработкой пустых строк
+                            def safe_float(value, default=0.0):
+                                if value == '' or value is None:
+                                    return default
+                                try:
+                                    return float(value)
+                                except (ValueError, TypeError):
+                                    return default
+
+                            # Пробуем разные поля для определения доступного баланса
+                            available_withdraw = safe_float(coin.get('availableToWithdraw'))
+                            wallet_balance = safe_float(coin.get('walletBalance'))
+                            equity = safe_float(coin.get('equity'))
+
+                            # Используем наибольший из доступных балансов
+                            free_balance = max(available_withdraw, wallet_balance, equity)
+
+                            if free_balance > 0:
+                                balances[symbol] = free_balance
+                                logger.debug(
+                                    f"Баланс {symbol}: {free_balance} (wallet: {wallet_balance}, equity: {equity}, available: {available_withdraw})")
+
+            if not balances:
+                logger.error("Не удалось извлечь информацию о балансе из ответа API")
+                logger.debug(f"Структура ответа баланса: {balance_data}")
+                return False
+
+            # Показываем все доступные балансы для диагностики
+            logger.info("💰 Доступные балансы:")
+            for currency, balance in balances.items():
+                if balance > 0:
+                    logger.info(f"   {currency}: {balance}")
 
             # Проверяем баланс для первой валюты в пути
             first_pair = opportunity.path[0]
@@ -95,26 +126,31 @@ class TradingManager:
                 required_amount = min(LIVE_TRADING_MAX_TRADE_USDT, opportunity.min_volume_usdt)
             else:
                 # Определяем базовую валюту из первой пары
+                base_currency = None
                 for currency in CROSS_CURRENCIES:
                     if first_pair.endswith(currency):
                         base_currency = currency
                         break
-                else:
+
+                if not base_currency:
                     logger.warning(f"Не удалось определить базовую валюту для {first_pair}")
                     return False
+
                 required_amount = opportunity.min_volume_usdt
 
             current_balance = balances.get(base_currency, 0)
 
             if current_balance < required_amount:
-                logger.warning(f"Недостаточный баланс {base_currency}: {current_balance} < {required_amount}")
+                logger.warning(f"❌ Недостаточный баланс {base_currency}: {current_balance:.6f} < {required_amount:.6f}")
                 return False
 
-            logger.info(f"Баланс достаточен: {base_currency} = {current_balance}")
+            logger.info(
+                f"✅ Баланс достаточен: {base_currency} = {current_balance:.6f} (требуется: {required_amount:.6f})")
             return True
 
         except Exception as e:
             logger.error(f"Ошибка проверки баланса: {e}")
+            logger.error(f"Структура balance_data: {balance_data}")
             return False
 
     async def _execute_arbitrage_path(self, opportunity: ArbitrageOpportunity) -> bool:
@@ -123,12 +159,12 @@ class TradingManager:
             trade_amount = min(LIVE_TRADING_MAX_TRADE_USDT, opportunity.min_volume_usdt)
             current_amount = trade_amount
 
-            logger.info(f"Начинаем арбитраж с суммой {trade_amount} USDT")
+            logger.info(f"🚀 Начинаем арбитраж с суммой {trade_amount} USDT")
 
             for i, (pair, direction, price) in enumerate(zip(
                     opportunity.path, opportunity.directions, opportunity.prices
             )):
-                logger.info(f"Шаг {i + 1}/3: {pair} - {direction.value.upper()} по цене {price}")
+                logger.info(f"📊 Шаг {i + 1}/3: {pair} - {direction.value.upper()} по цене {price}")
 
                 # Рассчитываем количество для ордера
                 if direction == TradeDirection.BUY:
@@ -138,6 +174,8 @@ class TradingManager:
                     qty = str(round(current_amount, 6))
                     current_amount = current_amount * price
 
+                logger.info(f"💱 Размещаем ордер: {qty} {pair}")
+
                 # Размещаем рыночный ордер
                 result = await self.api_client.place_order(
                     symbol=pair,
@@ -146,34 +184,41 @@ class TradingManager:
                 )
 
                 if not result:
-                    logger.error(f"Не удалось разместить ордер для {pair}")
+                    logger.error(f"❌ Не удалось разместить ордер для {pair}")
                     return False
 
-                logger.info(f"Ордер размещен: {result.get('orderId', 'N/A')}")
+                order_id = result.get('orderId', 'N/A')
+                logger.info(f"✅ Ордер размещен: {order_id}")
 
                 # Небольшая задержка между ордерами
                 await asyncio.sleep(LIVE_TRADING_ORDER_GAP_SEC)
 
-            logger.info(f"Арбитраж завершен, итоговая сумма: ~{current_amount:.2f} USDT")
+            logger.info(f"🎉 Арбитраж завершен, итоговая сумма: ~{current_amount:.2f} USDT")
             return True
 
         except Exception as e:
-            logger.error(f"Ошибка выполнения торгового пути: {e}")
+            logger.error(f"❌ Ошибка выполнения торгового пути: {e}")
             return False
 
     def _log_trade_details(self, opportunity: ArbitrageOpportunity):
         """Логирует детали сделки"""
-        logger.info(f"📈 Арбитражный путь: {' → '.join(opportunity.path)}")
+        logger.info("=" * 60)
+        logger.info("📈 ДЕТАЛИ АРБИТРАЖНОЙ СДЕЛКИ")
+        logger.info("=" * 60)
+        logger.info(f"🔄 Арбитражный путь: {' → '.join(opportunity.path)}")
         logger.info(f"💰 Ожидаемая прибыль: {opportunity.profit_percent:.4f}%")
         logger.info(f"💵 Минимальный объем: {opportunity.min_volume_usdt:.2f} USDT")
         logger.info(f"⚡ Время расчета: {opportunity.execution_time * 1000:.1f}ms")
         logger.info(f"📊 Стоимость спредов: {opportunity.spread_cost:.4f}%")
+        logger.info("🔄 Торговые шаги:")
 
         for i, (pair, direction, price) in enumerate(zip(
                 opportunity.path, opportunity.directions, opportunity.prices
         ), 1):
             action = "ПОКУПКА" if direction == TradeDirection.BUY else "ПРОДАЖА"
             logger.info(f"   {i}. {pair}: {action} по ${price:.8f}")
+
+        logger.info("=" * 60)
 
     async def get_trading_stats(self) -> Dict:
         """Возвращает статистику торговли"""

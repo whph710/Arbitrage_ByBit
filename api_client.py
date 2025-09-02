@@ -174,13 +174,14 @@ class BybitAPIClient:
             return None
 
     async def get_account_balance(self) -> Optional[Dict]:
-        """Получает баланс аккаунта (требует аутентификации)"""
+        """Получает баланс аккаунта (требует аутентификации) - ИСПРАВЛЕНО для UNIFIED"""
         if not self.api_key or not self.api_secret:
             logger.warning("Получение баланса недоступно - API ключи не настроены")
             return None
 
         url = f"{self.base_url}/account/wallet-balance"
-        params = "accountType=SPOT"
+        # ИЗМЕНЕНО: используем UNIFIED вместо SPOT
+        params = "accountType=UNIFIED"
         headers = self._get_auth_headers(params)
 
         try:
@@ -192,18 +193,21 @@ class BybitAPIClient:
                 ) as response:
                     if response.status != 200:
                         logger.error(f"Ошибка получения баланса: статус {response.status}")
+                        response_text = await response.text()
+                        logger.error(f"Ответ сервера: {response_text}")
                         return None
                     data = await response.json()
                     if data.get("retCode") != 0:
                         logger.error(f"API ошибка получения баланса: {data.get('retMsg')}")
                         return None
+                    logger.info("✅ Баланс аккаунта получен успешно")
                     return data.get("result")
         except Exception as e:
             logger.error(f"Исключение при получении баланса: {e}")
             return None
 
     async def place_order(self, symbol: str, side: str, qty: str, price: str = None) -> Optional[Dict]:
-        """Размещает ордер (требует аутентификации)"""
+        """Размещает ордер (требует аутентификации) - ИСПРАВЛЕНО для UNIFIED"""
         if not self.api_key or not self.api_secret:
             logger.error("Размещение ордера недоступно - API ключи не настроены")
             return None
@@ -236,8 +240,10 @@ class BybitAPIClient:
                     data = await response.json()
                     if data.get("retCode") != 0:
                         logger.error(f"Ошибка размещения ордера: {data.get('retMsg')}")
+                        response_text = await response.text()
+                        logger.error(f"Полный ответ сервера: {response_text}")
                         return None
-                    logger.info(f"Ордер размещен: {symbol} {side} {qty}")
+                    logger.info(f"✅ Ордер размещен: {symbol} {side} {qty}")
                     return data.get("result")
         except Exception as e:
             logger.error(f"Исключение при размещении ордера: {e}")
