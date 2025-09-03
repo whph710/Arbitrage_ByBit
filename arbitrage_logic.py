@@ -1,11 +1,11 @@
 import time
+import asyncio
 from typing import Dict, List, Optional
 from models import OrderBookData, ArbitrageOpportunity, TradeDirection
 from api_client import BybitAPIClient
 from csv_manager import CSVManager
 from config import *
 import logging
-import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +15,17 @@ class ArbitrageLogic:
         self.api_client = api_client
         self.csv_manager = csv_manager
 
+        # Настройки таймаутов
+        self.MAX_SCAN_TIME = 5.0  # Максимальное время полного сканирования
+        self.MAX_ORDERBOOK_LOAD_TIME = 3.0  # Максимальное время загрузки стаканов
+        self.MAX_ANALYSIS_TIME = 1.5  # Максимальное время анализа путей
+
+        # Адаптивные настройки
+        self.max_pairs_to_load = 100  # Динамически изменяемое количество пар
+        self.max_paths_to_analyze = 500  # Максимум путей для анализа
+
     def find_triangular_paths(self, base_currency: str = "USDT") -> List[List[str]]:
-        """Находит треугольные арбитражные пути - ИСПРАВЛЕНО"""
+        """Находит треугольные арбитражные пути - ОПТИМИЗИРОВАНО с ограничением"""
         try:
             paths = []
             base_pairs = [
@@ -26,12 +35,21 @@ class ArbitrageLogic:
 
             logger.debug(f"Найдено {len(base_pairs)} базовых пар с {base_currency}")
 
+            # ОПТИМИЗАЦИЯ: Ограничиваем количество базовых пар для анализа
+            base_pairs = base_pairs[:50]  # Анализируем максимум 50 базовых пар
+            paths_found = 0
+            max_paths = self.max_paths_to_analyze
+
             for pair1 in base_pairs:
+                if paths_found >= max_paths:
+                    logger.debug(f"Достигнут лимит путей ({max_paths}), прерываем поиск")
+                    break
+
                 currency_a = pair1.replace(base_currency, '')
 
                 # Ищем все пары с currency_a
                 for pair2 in self.api_client.tickers_set:
-                    if pair1 == pair2:
+                    if pair1 == pair2 or paths_found >= max_paths:
                         continue
 
                     currency_b = None
@@ -58,10 +76,12 @@ class ArbitrageLogic:
                             path = [pair1, pair2, pair3]
                             if self._validate_path(path, currency_a, currency_b, base_currency):
                                 paths.append(path)
-
+                                paths_found += 1
+                                if paths_found >= max_paths:
+                                    break
                             break
 
-            logger.debug(f"Всего найдено {len(paths)} валидных арбитражных путей")
+            logger.debug(f"Найдено {len(paths)} валидных арбитражных путей (лимит: {max_paths})")
             return paths
 
         except Exception as e:
@@ -227,10 +247,51 @@ class ArbitrageLogic:
             return None
 
     async def scan_arbitrage_opportunities(self) -> List[ArbitrageOpportunity]:
-        """Сканирует арбитражные возможности - ОПТИМИЗИРОВАНО"""
-        try:
-            scan_start = time.time()
+        """Сканирует арбитражные возможности - ОПТИМИЗИРОВАНО С ТАЙМАУТАМИ"""
+        scan_start = time.time()
 
+        try:
+            # ГЛАВНЫЙ ТАЙМАУТ - если сканирование занимает больше MAX_SCAN_TIME
+            timeout_task = asyncio.create_task(asyncio.sleep(self.MAX_SCAN_TIME))
+            scan_task = asyncio.create_task(self._perform_scan())
+
+            done, pending = await asyncio.wait(
+                [scan_task, timeout_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Отменяем оставшиеся задачи
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            if timeout_task in done:
+                logger.warning(f"⏰ Сканирование прервано по таймауту ({self.MAX_SCAN_TIME}s)")
+                self._adapt_scanning_parameters()
+                return []
+            else:
+                result = scan_task.result()
+                scan_time = time.time() - scan_start
+
+                if scan_time > 3.0:
+                    logger.debug(f"Долгое сканирование ({scan_time:.2f}s), адаптируем параметры")
+                    self._adapt_scanning_parameters()
+                elif scan_time < 1.0:
+                    logger.debug(f"Быстрое сканирование ({scan_time:.2f}s), можем увеличить нагрузку")
+                    self._increase_scanning_parameters()
+
+                return result
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка в scan_arbitrage_opportunities: {e}")
+            return []
+
+    async def _perform_scan(self) -> List[ArbitrageOpportunity]:
+        """Выполняет основное сканирование с контролем времени"""
+        try:
             # Получаем тикеры если их нет
             if not self.api_client.tickers_set:
                 tickers_result = await self.api_client.get_tickers()
@@ -238,113 +299,216 @@ class ArbitrageLogic:
                     logger.warning("Не удалось получить список тикеров")
                     return []
 
-            # Ищем арбитражные пути
+            # Ищем арбитражные пути с ограничением времени
+            paths_start = time.time()
             paths = self.find_triangular_paths()
+            paths_time = time.time() - paths_start
+
             if not paths:
                 logger.debug("Треугольные пути не найдены")
                 return []
 
-            logger.debug(f"Найдено {len(paths)} потенциальных путей для анализа")
+            logger.debug(f"Найдено {len(paths)} потенциальных путей за {paths_time:.2f}s")
 
             # Собираем уникальные пары для загрузки стаканов
             unique_pairs = set()
             for path in paths:
                 unique_pairs.update(path)
 
-            logger.debug(f"Загружаем стаканы для {len(unique_pairs)} торговых пар")
+            # АДАПТИВНОЕ ОГРАНИЧЕНИЕ количества пар
+            unique_pairs_list = list(unique_pairs)
+            if len(unique_pairs_list) > self.max_pairs_to_load:
+                # Выбираем самые популярные пары (те что чаще встречаются в путях)
+                pair_frequency = {}
+                for path in paths:
+                    for pair in path:
+                        pair_frequency[pair] = pair_frequency.get(pair, 0) + 1
 
-            # ОПТИМИЗАЦИЯ: Ограничиваем concurrent requests
-            max_concurrent = min(MAX_CONCURRENT_REQUESTS // 3, 150)  # Безопасное значение
-            semaphore = asyncio.Semaphore(max_concurrent)
+                unique_pairs_list = sorted(unique_pairs_list,
+                                           key=lambda x: pair_frequency[x],
+                                           reverse=True)[:self.max_pairs_to_load]
+                unique_pairs = set(unique_pairs_list)
 
-            async def safe_get_orderbook(pair):
-                """Безопасно получает стакан заявок"""
-                try:
-                    async with semaphore:
-                        if self.api_client._shutdown_event.is_set():
-                            return pair, None
-                        result = await self.api_client.get_orderbook(pair)
-                        return pair, result
-                except Exception as e:
-                    logger.debug(f"Ошибка получения стакана {pair}: {e}")
-                    return pair, None
+            logger.debug(f"Загружаем стаканы для {len(unique_pairs)} торговых пар (лимит: {self.max_pairs_to_load})")
 
-            # Получаем все стаканы параллельно
-            tasks = [safe_get_orderbook(pair) for pair in unique_pairs]
+            # Загружаем стаканы с таймаутом
+            orderbooks_start = time.time()
+            orderbooks = await self._load_orderbooks_with_timeout(unique_pairs)
+            orderbooks_time = time.time() - orderbooks_start
 
-            try:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            except Exception as e:
-                logger.error(f"Критическая ошибка при получении стаканов: {e}")
-                return []
+            logger.debug(f"Загружено {len(orderbooks)}/{len(unique_pairs)} стаканов за {orderbooks_time:.2f}s")
 
-            # Обрабатываем результаты
-            orderbooks = {}
-            successful_loads = 0
-
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.debug(f"Исключение при получении стакана: {result}")
-                    continue
-
-                try:
-                    pair, orderbook_data = result
-                    if orderbook_data and isinstance(orderbook_data, OrderBookData):
-                        orderbooks[pair] = orderbook_data
-                        successful_loads += 1
-                except Exception as e:
-                    logger.debug(f"Ошибка обработки результата: {e}")
-
-            logger.debug(f"Успешно загружено {successful_loads}/{len(unique_pairs)} стаканов")
-
-            if successful_loads == 0:
+            if not orderbooks:
                 logger.warning("Не удалось загрузить ни одного стакана заявок")
                 return []
 
-            # Анализируем арбитражные возможности
-            opportunities = []
-            processed = 0
+            # Анализируем арбитражные возможности с ограничением времени
+            analysis_start = time.time()
+            opportunities = await self._analyze_opportunities_with_timeout(paths, orderbooks)
+            analysis_time = time.time() - analysis_start
 
-            for path in paths:
-                try:
-                    # Проверяем что все пары из пути имеют стаканы
-                    if not all(pair in orderbooks for pair in path):
-                        continue
-
-                    opportunity = self.calculate_arbitrage_profit(path, orderbooks)
-                    if opportunity:
-                        opportunities.append(opportunity)
-
-                        # Сохраняем в CSV
-                        try:
-                            self.csv_manager.save_opportunity(opportunity)
-                        except Exception as e:
-                            logger.debug(f"Ошибка сохранения в CSV: {e}")
-
-                    processed += 1
-
-                except Exception as e:
-                    logger.debug(f"Ошибка анализа пути {path}: {e}")
-                    continue
-
-            # Сортируем по прибыльности
-            opportunities.sort(key=lambda x: x.profit_percent, reverse=True)
-
-            scan_time = time.time() - scan_start
-
-            logger.debug(f"Сканирование завершено: {scan_time:.2f}с")
-            logger.debug(f"Проанализировано путей: {processed}/{len(paths)}")
-            logger.debug(f"Найдено возможностей: {len(opportunities)}")
-
-            if opportunities:
-                best_profit = opportunities[0].profit_percent
-                logger.debug(f"Лучшая возможность: {best_profit:.4f}%")
+            logger.debug(f"Анализ завершен за {analysis_time:.2f}s, найдено {len(opportunities)} возможностей")
 
             return opportunities
 
+        except asyncio.CancelledError:
+            logger.debug("Сканирование отменено")
+            raise
         except Exception as e:
-            logger.error(f"Критическая ошибка в scan_arbitrage_opportunities: {e}", exc_info=True)
+            logger.error(f"Ошибка в _perform_scan: {e}")
             return []
+
+    async def _load_orderbooks_with_timeout(self, unique_pairs: set) -> Dict[str, OrderBookData]:
+        """Загружает стаканы с таймаутом"""
+        try:
+            # Создаем задачу загрузки с таймаутом
+            load_task = asyncio.create_task(self._load_orderbooks(unique_pairs))
+
+            try:
+                orderbooks = await asyncio.wait_for(load_task, timeout=self.MAX_ORDERBOOK_LOAD_TIME)
+                return orderbooks
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Загрузка стаканов прервана по таймауту ({self.MAX_ORDERBOOK_LOAD_TIME}s)")
+                load_task.cancel()
+
+                # Возвращаем частично загруженные данные если есть
+                try:
+                    await load_task
+                except asyncio.CancelledError:
+                    pass
+
+                return {}
+
+        except Exception as e:
+            logger.error(f"Ошибка загрузки стаканов: {e}")
+            return {}
+
+    async def _load_orderbooks(self, unique_pairs: set) -> Dict[str, OrderBookData]:
+        """Загружает стаканы заявок"""
+        # Ограничиваем количество одновременных запросов
+        max_concurrent = min(self.max_pairs_to_load // 2, 50)
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def safe_get_orderbook(pair):
+            """Безопасно получает стакан заявок"""
+            try:
+                async with semaphore:
+                    if self.api_client._shutdown_event.is_set():
+                        return pair, None
+                    result = await self.api_client.get_orderbook(pair)
+                    return pair, result
+            except Exception as e:
+                logger.debug(f"Ошибка получения стакана {pair}: {e}")
+                return pair, None
+
+        # Получаем все стаканы параллельно
+        tasks = [safe_get_orderbook(pair) for pair in unique_pairs]
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"Критическая ошибка при получении стаканов: {e}")
+            return {}
+
+        # Обрабатываем результаты
+        orderbooks = {}
+
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+
+            try:
+                pair, orderbook_data = result
+                if orderbook_data and isinstance(orderbook_data, OrderBookData):
+                    orderbooks[pair] = orderbook_data
+            except Exception as e:
+                logger.debug(f"Ошибка обработки результата: {e}")
+
+        return orderbooks
+
+    async def _analyze_opportunities_with_timeout(self, paths: List[List[str]], orderbooks: Dict[str, OrderBookData]) -> \
+    List[ArbitrageOpportunity]:
+        """Анализирует возможности с таймаутом"""
+        try:
+            analysis_task = asyncio.create_task(self._analyze_opportunities(paths, orderbooks))
+
+            try:
+                opportunities = await asyncio.wait_for(analysis_task, timeout=self.MAX_ANALYSIS_TIME)
+                return opportunities
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Анализ прерван по таймауту ({self.MAX_ANALYSIS_TIME}s)")
+                analysis_task.cancel()
+
+                try:
+                    await analysis_task
+                except asyncio.CancelledError:
+                    pass
+
+                return []
+
+        except Exception as e:
+            logger.error(f"Ошибка анализа возможностей: {e}")
+            return []
+
+    async def _analyze_opportunities(self, paths: List[List[str]], orderbooks: Dict[str, OrderBookData]) -> List[
+        ArbitrageOpportunity]:
+        """Анализирует арбитражные возможности"""
+        opportunities = []
+        processed = 0
+
+        for path in paths:
+            try:
+                # Проверяем что все пары из пути имеют стаканы
+                if not all(pair in orderbooks for pair in path):
+                    continue
+
+                opportunity = self.calculate_arbitrage_profit(path, orderbooks)
+                if opportunity:
+                    opportunities.append(opportunity)
+
+                    # Сохраняем в CSV (неблокирующе)
+                    try:
+                        self.csv_manager.save_opportunity(opportunity)
+                    except Exception as e:
+                        logger.debug(f"Ошибка сохранения в CSV: {e}")
+
+                processed += 1
+
+                # Каждые 100 обработанных путей проверяем, не нужно ли прерваться
+                if processed % 100 == 0:
+                    await asyncio.sleep(0.001)  # Даем возможность другим задачам
+
+            except Exception as e:
+                logger.debug(f"Ошибка анализа пути {path}: {e}")
+                continue
+
+        # Сортируем по прибыльности
+        opportunities.sort(key=lambda x: x.profit_percent, reverse=True)
+        return opportunities
+
+    def _adapt_scanning_parameters(self):
+        """Адаптирует параметры сканирования при долгом выполнении"""
+        # Уменьшаем количество пар для загрузки
+        if self.max_pairs_to_load > 30:
+            self.max_pairs_to_load = max(30, self.max_pairs_to_load - 20)
+            logger.debug(f"📉 Уменьшаем max_pairs_to_load до {self.max_pairs_to_load}")
+
+        # Уменьшаем количество путей для анализа
+        if self.max_paths_to_analyze > 100:
+            self.max_paths_to_analyze = max(100, self.max_paths_to_analyze - 100)
+            logger.debug(f"📉 Уменьшаем max_paths_to_analyze до {self.max_paths_to_analyze}")
+
+    def _increase_scanning_parameters(self):
+        """Увеличивает параметры сканирования при быстром выполнении"""
+        # Увеличиваем количество пар для загрузки
+        if self.max_pairs_to_load < 150:
+            self.max_pairs_to_load = min(150, self.max_pairs_to_load + 10)
+            logger.debug(f"📈 Увеличиваем max_pairs_to_load до {self.max_pairs_to_load}")
+
+        # Увеличиваем количество путей для анализа
+        if self.max_paths_to_analyze < 1000:
+            self.max_paths_to_analyze = min(1000, self.max_paths_to_analyze + 50)
+            logger.debug(f"📈 Увеличиваем max_paths_to_analyze до {self.max_paths_to_analyze}")
 
     def print_opportunity(self, opportunity: ArbitrageOpportunity, index: int):
         """Выводит информацию об арбитражной возможности - УЛУЧШЕНО"""
@@ -386,3 +550,13 @@ class ArbitrageLogic:
         except Exception as e:
             logger.error(f"Ошибка отображения возможности #{index}: {e}")
             print(f"❌ Ошибка отображения арбитража #{index}")
+
+    def get_performance_stats(self):
+        """Возвращает статистику производительности"""
+        return {
+            "max_pairs_to_load": self.max_pairs_to_load,
+            "max_paths_to_analyze": self.max_paths_to_analyze,
+            "max_scan_time": self.MAX_SCAN_TIME,
+            "max_orderbook_load_time": self.MAX_ORDERBOOK_LOAD_TIME,
+            "max_analysis_time": self.MAX_ANALYSIS_TIME
+        }
