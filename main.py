@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 Арбитражный бот для Bybit - main.py
+ИСПРАВЛЕННАЯ И ОПТИМИЗИРОВАННАЯ ВЕРСИЯ
 """
 import asyncio
 import logging
 import signal
 import sys
+import time
 from pathlib import Path
 from config import *
 from csv_manager import CSVManager
@@ -22,93 +24,208 @@ class BybitArbitrageBot:
         self.arbitrage_logic = ArbitrageLogic(self.api_client, self.csv_manager)
         self.trading_manager = TradingManager(self.api_client, self.csv_manager)
         self.shutdown_event = asyncio.Event()
+
+        # Статистика и мониторинг
         self.consecutive_errors = 0
-        self.max_consecutive_errors = 5
+        self.max_consecutive_errors = 10
+        self.total_scans = 0
+        self.total_opportunities_found = 0
+        self.scan_times = []
+        self.start_time = time.time()
+
         setup_logging()
         self.logger = logging.getLogger(__name__)
 
     async def start(self):
-        await self.api_client.start()
-        self.logger.info("Арбитражный бот запущен")
+        """Запускает бота"""
+        try:
+            await self.api_client.start()
+            self.logger.info("🚀 Арбитражный бот успешно запущен")
+
+            # Проверяем подключение к API
+            if not await self._test_api_connection():
+                self.logger.error("❌ Не удалось подключиться к API Bybit")
+                return False
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Ошибка запуска бота: {e}")
+            return False
+
+    async def _test_api_connection(self):
+        """Тестирует подключение к API"""
+        try:
+            self.logger.info("🔍 Тестируем подключение к API...")
+            tickers = await self.api_client.get_tickers()
+            if tickers and len(tickers) > 0:
+                self.logger.info(f"✅ API подключение успешно. Доступно {len(tickers)} торговых пар")
+                return True
+            else:
+                self.logger.error("❌ API вернуло пустой список тикеров")
+                return False
+        except Exception as e:
+            self.logger.error(f"❌ Ошибка тестирования API: {e}")
+            return False
+
+    async def _print_final_stats(self):
+        """Выводит финальную статистику"""
+        uptime = time.time() - self.start_time
+        hours, remainder = divmod(uptime, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        avg_scan_time = sum(self.scan_times) / len(self.scan_times) if self.scan_times else 0
+
+        self.logger.info("=" * 70)
+        self.logger.info("📊 ФИНАЛЬНАЯ СТАТИСТИКА СЕССИИ")
+        self.logger.info("=" * 70)
+        self.logger.info(f"⏱️  Время работы: {int(hours)}ч {int(minutes)}м {int(seconds)}с")
+        self.logger.info(f"🔄 Всего сканирований: {self.total_scans}")
+        self.logger.info(f"💎 Найдено возможностей: {self.total_opportunities_found}")
+        self.logger.info(f"📈 Среднее время сканирования: {avg_scan_time:.2f}с")
+        self.logger.info(f"🎯 Сохранено в CSV: {self.csv_manager.get_opportunities_count()}")
+
+        # Статистика торговли
+        try:
+            trading_stats = await self.trading_manager.get_trading_stats()
+            if trading_stats['session_trades'] > 0:
+                self.logger.info(f"💰 Выполнено сделок: {trading_stats['session_trades']}")
+                self.logger.info(f"💵 Прибыль сессии: ${trading_stats['session_profit']:.2f}")
+        except Exception as e:
+            self.logger.debug(f"Ошибка получения торговой статистики: {e}")
+
+        self.logger.info("=" * 70)
 
     async def close(self):
+        """Закрывает бота"""
         try:
+            self.logger.info("🛑 Останавливаем бота...")
             await self.api_client.close()
+            await self._print_final_stats()
+            self.logger.info("✅ Арбитражный бот остановлен")
         except Exception as e:
-            self.logger.error(f"Ошибка при закрытии API клиента: {e}")
-        self.logger.info("Арбитражный бот остановлен")
+            self.logger.error(f"Ошибка при закрытии бота: {e}")
 
     async def run(self):
-        await self.start()
+        """Главный цикл работы бота"""
+        if not await self.start():
+            return
+
         try:
+            # Показываем агрессивные настройки если доступны
+            try:
+                from config import print_aggressive_mode_warning
+                print_aggressive_mode_warning()
+            except (ImportError, AttributeError):
+                self.logger.debug("Функция агрессивных настроек недоступна")
+
             while not self.shutdown_event.is_set():
                 try:
-                    # Основной цикл сканирования
+                    scan_start_time = time.time()
+
+                    # Основное сканирование
                     opportunities = await self.arbitrage_logic.scan_arbitrage_opportunities()
 
-                    # Сброс счетчика ошибок при успешном выполнении
+                    scan_duration = time.time() - scan_start_time
+                    self.scan_times.append(scan_duration)
+                    self.total_scans += 1
+
+                    # Ограничиваем список времен сканирования (последние 100)
+                    if len(self.scan_times) > 100:
+                        self.scan_times = self.scan_times[-100:]
+
+                    # Сброс счетчика ошибок при успешном сканировании
                     self.consecutive_errors = 0
 
                     if opportunities:
-                        self.logger.info(f"Найдено {len(opportunities)} арбитражных возможностей!")
+                        opportunities_count = len(opportunities)
+                        self.total_opportunities_found += opportunities_count
 
+                        self.logger.info(
+                            f"🎯 Найдено {opportunities_count} арбитражных возможностей! (скан: {scan_duration:.2f}с)")
+
+                        # Показываем найденные возможности
                         displayed_count = 0
+                        successful_trades = 0
+
                         for i, opportunity in enumerate(opportunities, 1):
                             if displayed_count >= MAX_OPPORTUNITIES_DISPLAY:
-                                self.logger.info(
-                                    f"Показано {displayed_count} из {len(opportunities)} возможностей (лимит достигнут)")
+                                self.logger.info(f"📊 Показано {displayed_count} из {opportunities_count} возможностей")
                                 break
 
                             try:
+                                # Показываем возможность
                                 self.arbitrage_logic.print_opportunity(opportunity, i)
                                 displayed_count += 1
 
-                                # Попытка выполнить сделку
+                                # Попытка торговли
                                 if ENABLE_LIVE_TRADING:
-                                    success = await self.trading_manager.execute_trade(opportunity)
-                                    if success:
+                                    trade_success = await self.trading_manager.execute_trade(opportunity)
+                                    if trade_success:
+                                        successful_trades += 1
                                         self.logger.info(f"✅ Сделка #{i} выполнена успешно")
                                     else:
-                                        self.logger.debug(f"❌ Сделка #{i} не выполнена")
+                                        self.logger.debug(f"⏭️  Сделка #{i} пропущена")
 
                             except Exception as e:
                                 self.logger.error(f"Ошибка обработки возможности #{i}: {e}")
                                 continue
-                    else:
-                        self.logger.debug("Прибыльных арбитражных возможностей не найдено")
 
-                    # Ожидание перед следующим сканированием
+                        # Сводка по торговле
+                        if ENABLE_LIVE_TRADING and successful_trades > 0:
+                            self.logger.info(
+                                f"💰 Успешных сделок в этом цикле: {successful_trades}/{opportunities_count}")
+
+                    else:
+                        # Более информативное сообщение когда нет возможностей
+                        if self.total_scans % 20 == 0:  # Каждые 20 сканирований
+                            self.logger.info(
+                                f"🔍 Сканирование #{self.total_scans}: возможностей не найдено (время: {scan_duration:.2f}с)")
+                        else:
+                            self.logger.debug(f"Сканирование #{self.total_scans}: нет возможностей")
+
+                    # Пауза перед следующим сканированием
                     try:
                         await asyncio.wait_for(
-                            asyncio.sleep(SCAN_INTERVAL),
-                            timeout=SCAN_INTERVAL + 5
+                            self.shutdown_event.wait(),
+                            timeout=SCAN_INTERVAL
                         )
+                        # Если дождались события - выходим
+                        if self.shutdown_event.is_set():
+                            break
                     except asyncio.TimeoutError:
-                        self.logger.debug("Timeout в sleep, продолжаем")
+                        # Таймаут - это нормально, продолжаем сканирование
                         pass
 
                 except KeyboardInterrupt:
-                    self.logger.info("Получен сигнал остановки (KeyboardInterrupt)...")
+                    self.logger.info("⌨️  Получен сигнал остановки от пользователя...")
                     break
 
                 except asyncio.CancelledError:
-                    self.logger.info("Задача была отменена")
+                    self.logger.info("🔄 Задача отменена")
                     break
 
                 except Exception as e:
                     self.consecutive_errors += 1
-                    self.logger.error(f"Ошибка в главном цикле (#{self.consecutive_errors}): {e}")
+                    error_msg = f"Ошибка в главном цикле (#{self.consecutive_errors}): {e}"
 
-                    # Если слишком много подряд идущих ошибок - делаем паузу подольше
+                    if self.consecutive_errors <= 3:
+                        self.logger.error(error_msg)
+                    else:
+                        self.logger.warning(error_msg)  # Не спамим в логи
+
+                    # Прогрессивное увеличение задержки при ошибках
                     if self.consecutive_errors >= self.max_consecutive_errors:
-                        self.logger.warning(f"Много ошибок подряд ({self.consecutive_errors}), увеличиваем паузу")
-                        await asyncio.sleep(ERROR_RETRY_INTERVAL * 5)
-                        self.consecutive_errors = 0  # Сбрасываем счетчик
+                        self.logger.warning(f"🚨 Критическое количество ошибок ({self.consecutive_errors})")
+                        self.logger.warning("⏸️  Увеличиваем паузу и сбрасываем счетчик...")
+                        await asyncio.sleep(ERROR_RETRY_INTERVAL * 10)
+                        self.consecutive_errors = 0
+                    elif self.consecutive_errors >= 5:
+                        await asyncio.sleep(ERROR_RETRY_INTERVAL * 3)
                     else:
                         await asyncio.sleep(ERROR_RETRY_INTERVAL)
 
         except Exception as e:
-            self.logger.error(f"Критическая ошибка в run(): {e}", exc_info=True)
+            self.logger.error(f"💥 Критическая ошибка в run(): {e}", exc_info=True)
         finally:
             await self.close()
 
@@ -118,34 +235,52 @@ def _setup_signal_handlers(bot: BybitArbitrageBot):
 
     def signal_handler(signame):
         def handler(sig=None, frame=None):
-            logging.info(f"Получен сигнал {signame}, остановка...")
+            logging.info(f"📡 Получен сигнал {signame}, инициализация остановки...")
             bot.shutdown_event.set()
 
         return handler
 
     try:
-        # Пытаемся использовать loop.add_signal_handler (Unix)
-        loop = asyncio.get_running_loop()
+        # Unix системы
         if hasattr(signal, 'SIGTERM'):
-            loop.add_signal_handler(signal.SIGTERM, signal_handler('SIGTERM'))
+            signal.signal(signal.SIGTERM, signal_handler('SIGTERM'))
         if hasattr(signal, 'SIGINT'):
-            loop.add_signal_handler(signal.SIGINT, signal_handler('SIGINT'))
-    except (NotImplementedError, RuntimeError):
+            signal.signal(signal.SIGINT, signal_handler('SIGINT'))
+
+        # Дополнительные сигналы для Unix
+        if hasattr(signal, 'SIGHUP'):
+            signal.signal(signal.SIGHUP, signal_handler('SIGHUP'))
+
+        logging.debug("✅ Обработчики сигналов настроены (Unix)")
+
+    except (NotImplementedError, AttributeError, OSError):
         # Windows compatibility fallback
         if hasattr(signal, 'SIGINT'):
             signal.signal(signal.SIGINT, signal_handler('SIGINT'))
-        if hasattr(signal, 'SIGTERM'):
-            signal.signal(signal.SIGTERM, signal_handler('SIGTERM'))
+        if hasattr(signal, 'SIGBREAK'):
+            signal.signal(signal.SIGBREAK, signal_handler('SIGBREAK'))
+
+        logging.debug("✅ Обработчики сигналов настроены (Windows)")
 
 
 async def main():
     """Главная функция"""
+    print("🚀 Запуск арбитражного бота Bybit...")
+
     # Проверка зависимостей
     if not check_dependencies():
+        print("❌ Не все зависимости установлены")
         sys.exit(1)
 
     # Вывод информации о запуске
     print_startup_info()
+
+    # Проверка агрессивных настроек
+    try:
+        from config import print_aggressive_mode_warning
+        print_aggressive_mode_warning()
+    except (ImportError, AttributeError):
+        pass  # Функция недоступна
 
     # Создание бота
     bot = BybitArbitrageBot()
@@ -155,21 +290,25 @@ async def main():
 
     try:
         # Запуск бота
+        print("🎯 Начинаем поиск арбитражных возможностей...")
         await bot.run()
 
     except KeyboardInterrupt:
-        bot.logger.info("Получен KeyboardInterrupt, завершение работы...")
+        bot.logger.info("⌨️  KeyboardInterrupt: завершение работы по требованию пользователя")
 
     except Exception as e:
-        bot.logger.error(f"Критическая ошибка в main(): {e}", exc_info=True)
+        bot.logger.error(f"💥 Критическая ошибка в main(): {e}", exc_info=True)
+        print(f"❌ Критическая ошибка: {e}")
 
     finally:
-        # Принудительное закрытие
+        # Принудительное закрытие при необходимости
         try:
-            if not bot.api_client.session.closed:
+            if hasattr(bot, 'api_client') and bot.api_client.session and not bot.api_client.session.closed:
                 await bot.close()
         except Exception as e:
-            logging.error(f"Ошибка при финальном закрытии: {e}")
+            logging.error(f"Ошибка финального закрытия: {e}")
+
+        print("👋 Арбитражный бот завершил работу")
 
 
 if __name__ == "__main__":
@@ -182,6 +321,11 @@ if __name__ == "__main__":
             # Старые версии Python
             pass
 
+    # Проверка версии Python
+    if sys.version_info < (3, 7):
+        print("❌ Требуется Python 3.7 или выше")
+        sys.exit(1)
+
     try:
         # Запуск основного цикла
         asyncio.run(main())
@@ -190,5 +334,6 @@ if __name__ == "__main__":
         print("\n🛑 Программа остановлена пользователем")
 
     except Exception as e:
-        logging.error(f"Критическая ошибка при запуске: {e}", exc_info=True)
+        logging.error(f"💥 Критическая ошибка при запуске: {e}", exc_info=True)
+        print(f"❌ Критическая ошибка при запуске: {e}")
         sys.exit(1)
