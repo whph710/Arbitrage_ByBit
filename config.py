@@ -53,8 +53,7 @@ CROSS_CURRENCIES = [
 ]
 EXCLUDED_CURRENCIES = []
 
-# ИСПРАВЛЕНО: Увеличиваем минимальную ликвидность для соответствия требованиям биржи
-MIN_LIQUIDITY_VOLUME = 50  # Увеличено с 10 до 50 USDT
+MIN_LIQUIDITY_VOLUME = 50  # Минимальная ликвидность для соответствия требованиям биржи
 
 # =============================================================================
 # НАСТРОЙКИ ЛОГИРОВАНИЯ
@@ -78,13 +77,13 @@ SOUND_FILE_PATH = "alert.wav"
 # =============================================================================
 USE_ORDERBOOK_CACHE = False
 ORDERBOOK_CACHE_TTL = 0
-MAX_CONCURRENT_REQUESTS = 500
+MAX_CONCURRENT_REQUESTS = 500  # Высокое значение для агрессивного сканирования
 PERFORMANCE_DIAGNOSTICS = True
 
 # =============================================================================
 # НАСТРОЙКИ ФИЛЬТРАЦИИ
 # =============================================================================
-FILTER_LOW_LIQUIDITY = True  # ИСПРАВЛЕНО: Включаем фильтрацию низкой ликвидности
+FILTER_LOW_LIQUIDITY = True
 MAX_SPREAD_PERCENT = 10.0
 EXCLUDE_HIGH_VOLATILITY = False
 MAX_VOLATILITY_PERCENT = 100.0
@@ -92,7 +91,7 @@ MAX_VOLATILITY_PERCENT = 100.0
 # =============================================================================
 # НАСТРОЙКИ БЕЗОПАСНОСТИ / СЕТИ
 # =============================================================================
-API_RATE_LIMIT = 5000
+API_RATE_LIMIT = 5000  # Высокий лимит для максимального сканирования
 SSL_VERIFY = True
 NETWORK_TIMEOUT = 15
 
@@ -110,9 +109,8 @@ ORDERBOOK_LEVELS = 50
 ENABLE_LIVE_TRADING = True
 LIVE_TRADING_DRY_RUN = False
 
-# ИСПРАВЛЕНО: Увеличиваем минимальную сумму сделки для соответствия требованиям Bybit
 LIVE_TRADING_MAX_TRADE_USDT = 1000.0  # Максимальная сумма сделки
-LIVE_TRADING_MIN_TRADE_USDT = 5.0     # ДОБАВЛЕНО: Минимальная сумма сделки
+LIVE_TRADING_MIN_TRADE_USDT = 5.0     # Минимальная сумма сделки
 
 LIVE_TRADING_MAX_EXEC_PER_MIN = 60
 LIVE_TRADING_ORDER_GAP_SEC = 0.05
@@ -132,23 +130,44 @@ def validate_config():
     errors = []
     warnings = []
 
+    # Проверка настроек торговли
     if ENABLE_LIVE_TRADING and not LIVE_TRADING_DRY_RUN:
         if not API_KEY or not API_SECRET:
             errors.append("Для реальной торговли необходимы API_KEY и API_SECRET")
         if API_TESTNET:
             warnings.append("Включена тестовая сеть (API_TESTNET=True), реальные сделки выполняться не будут")
+        else:
+            warnings.append("ВНИМАНИЕ: Включена РЕАЛЬНАЯ торговля на основной сети!")
 
+    # Проверка размеров сделок
     if ENABLE_LIVE_TRADING and LIVE_TRADING_MAX_TRADE_USDT > 10000:
         warnings.append(f"Очень большой размер сделки: {LIVE_TRADING_MAX_TRADE_USDT} USDT")
 
+    # Проверка интервалов
     if SCAN_INTERVAL < 0.1:
         warnings.append("Очень короткий интервал сканирования может вызвать превышение лимитов API")
 
-    # ДОБАВЛЕНО: Проверка минимальной суммы сделки
+    # Проверка минимальной суммы сделки
     if LIVE_TRADING_MIN_TRADE_USDT < 5.0:
         warnings.append("Минимальная сумма сделки может быть слишком мала для Bybit (рекомендуется >= $5)")
 
+    # Проверка ликвидности
     if MIN_LIQUIDITY_VOLUME < LIVE_TRADING_MIN_TRADE_USDT:
         warnings.append(f"MIN_LIQUIDITY_VOLUME ({MIN_LIQUIDITY_VOLUME}) меньше LIVE_TRADING_MIN_TRADE_USDT ({LIVE_TRADING_MIN_TRADE_USDT})")
+
+    # Проверка прибыльности
+    if MIN_PROFIT_THRESHOLD < 0.001:
+        warnings.append("Очень низкий порог прибыли может привести к убыточным сделкам из-за комиссий")
+
+    # Проверка API лимитов
+    if API_RATE_LIMIT > 1000:
+        warnings.append("Высокий API_RATE_LIMIT может вызвать блокировку от биржи")
+
+    # Проверка агрессивных настроек
+    if MAX_CONCURRENT_REQUESTS > 100:
+        warnings.append("Высокое значение MAX_CONCURRENT_REQUESTS может перегрузить API")
+
+    if LIVE_TRADING_ORDER_GAP_SEC < 0.1:
+        warnings.append("Очень короткий интервал между ордерами может вызвать ошибки API")
 
     return errors, warnings

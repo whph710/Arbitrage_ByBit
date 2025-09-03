@@ -22,6 +22,8 @@ class BybitArbitrageBot:
         self.arbitrage_logic = ArbitrageLogic(self.api_client, self.csv_manager)
         self.trading_manager = TradingManager(self.api_client, self.csv_manager)
         self.shutdown_event = asyncio.Event()
+        self.consecutive_errors = 0
+        self.max_consecutive_errors = 5
         setup_logging()
         self.logger = logging.getLogger(__name__)
 
@@ -41,116 +43,131 @@ class BybitArbitrageBot:
         try:
             while not self.shutdown_event.is_set():
                 try:
-                    # ИСПРАВЛЕНИЕ: Обернем в try-except для перехвата StopIteration
-                    try:
-                        opportunities = await self.arbitrage_logic.scan_arbitrage_opportunities()
-                    except StopIteration:
-                        self.logger.debug("StopIteration перехвачен в scan_arbitrage_opportunities")
-                        opportunities = []
-                    except RuntimeError as e:
-                        if "StopIteration" in str(e):
-                            self.logger.debug("RuntimeError со StopIteration перехвачен")
-                            opportunities = []
-                        else:
-                            raise
+                    # Основной цикл сканирования
+                    opportunities = await self.arbitrage_logic.scan_arbitrage_opportunities()
+
+                    # Сброс счетчика ошибок при успешном выполнении
+                    self.consecutive_errors = 0
 
                     if opportunities:
                         self.logger.info(f"Найдено {len(opportunities)} арбитражных возможностей!")
-                        for i, opportunity in enumerate(opportunities[:MAX_OPPORTUNITIES_DISPLAY], 1):
+
+                        displayed_count = 0
+                        for i, opportunity in enumerate(opportunities, 1):
+                            if displayed_count >= MAX_OPPORTUNITIES_DISPLAY:
+                                self.logger.info(
+                                    f"Показано {displayed_count} из {len(opportunities)} возможностей (лимит достигнут)")
+                                break
+
                             try:
                                 self.arbitrage_logic.print_opportunity(opportunity, i)
+                                displayed_count += 1
+
+                                # Попытка выполнить сделку
                                 if ENABLE_LIVE_TRADING:
-                                    await self.trading_manager.execute_trade(opportunity)
-                            except (StopIteration, RuntimeError) as e:
-                                if "StopIteration" in str(e):
-                                    self.logger.debug(f"StopIteration в обработке возможности {i}")
-                                    continue
-                                else:
-                                    raise
+                                    success = await self.trading_manager.execute_trade(opportunity)
+                                    if success:
+                                        self.logger.info(f"✅ Сделка #{i} выполнена успешно")
+                                    else:
+                                        self.logger.debug(f"❌ Сделка #{i} не выполнена")
+
+                            except Exception as e:
+                                self.logger.error(f"Ошибка обработки возможности #{i}: {e}")
+                                continue
                     else:
                         self.logger.debug("Прибыльных арбитражных возможностей не найдено")
 
-                    # Безопасный sleep с проверкой shutdown
+                    # Ожидание перед следующим сканированием
                     try:
                         await asyncio.wait_for(
                             asyncio.sleep(SCAN_INTERVAL),
-                            timeout=SCAN_INTERVAL + 1
+                            timeout=SCAN_INTERVAL + 5
                         )
                     except asyncio.TimeoutError:
+                        self.logger.debug("Timeout в sleep, продолжаем")
                         pass
 
                 except KeyboardInterrupt:
                     self.logger.info("Получен сигнал остановки (KeyboardInterrupt)...")
                     break
-                except (StopIteration, RuntimeError) as e:
-                    if "StopIteration" in str(e):
-                        self.logger.warning(f"StopIteration в главном цикле: {e}")
-                        continue
-                    else:
-                        self.logger.error(f"RuntimeError в главном цикле: {e}")
-                        await asyncio.sleep(ERROR_RETRY_INTERVAL)
+
                 except asyncio.CancelledError:
                     self.logger.info("Задача была отменена")
                     break
+
                 except Exception as e:
-                    self.logger.error(f"Ошибка в главном цикле: {e}", exc_info=True)
-                    await asyncio.sleep(ERROR_RETRY_INTERVAL)
+                    self.consecutive_errors += 1
+                    self.logger.error(f"Ошибка в главном цикле (#{self.consecutive_errors}): {e}")
+
+                    # Если слишком много подряд идущих ошибок - делаем паузу подольше
+                    if self.consecutive_errors >= self.max_consecutive_errors:
+                        self.logger.warning(f"Много ошибок подряд ({self.consecutive_errors}), увеличиваем паузу")
+                        await asyncio.sleep(ERROR_RETRY_INTERVAL * 5)
+                        self.consecutive_errors = 0  # Сбрасываем счетчик
+                    else:
+                        await asyncio.sleep(ERROR_RETRY_INTERVAL)
+
+        except Exception as e:
+            self.logger.error(f"Критическая ошибка в run(): {e}", exc_info=True)
         finally:
             await self.close()
 
 
-def _setup_signal_handlers(loop, shutdown_event: asyncio.Event):
+def _setup_signal_handlers(bot: BybitArbitrageBot):
     """Настройка обработчиков сигналов"""
 
     def signal_handler(signame):
-        def handler():
+        def handler(sig=None, frame=None):
             logging.info(f"Получен сигнал {signame}, остановка...")
-            shutdown_event.set()
+            bot.shutdown_event.set()
 
         return handler
 
     try:
+        # Пытаемся использовать loop.add_signal_handler (Unix)
+        loop = asyncio.get_running_loop()
         if hasattr(signal, 'SIGTERM'):
             loop.add_signal_handler(signal.SIGTERM, signal_handler('SIGTERM'))
         if hasattr(signal, 'SIGINT'):
             loop.add_signal_handler(signal.SIGINT, signal_handler('SIGINT'))
-    except NotImplementedError:
+    except (NotImplementedError, RuntimeError):
         # Windows compatibility fallback
-        def handle_exit(sig, frame):
-            logging.info(f"Получен сигнал {sig}, остановка...")
-            shutdown_event.set()
-
         if hasattr(signal, 'SIGINT'):
-            signal.signal(signal.SIGINT, handle_exit)
+            signal.signal(signal.SIGINT, signal_handler('SIGINT'))
         if hasattr(signal, 'SIGTERM'):
-            signal.signal(signal.SIGTERM, handle_exit)
+            signal.signal(signal.SIGTERM, signal_handler('SIGTERM'))
 
 
 async def main():
     """Главная функция"""
+    # Проверка зависимостей
     if not check_dependencies():
         sys.exit(1)
 
+    # Вывод информации о запуске
     print_startup_info()
 
     # Создание бота
     bot = BybitArbitrageBot()
 
     # Настройка обработчиков сигналов
-    loop = asyncio.get_running_loop()
-    _setup_signal_handlers(loop, bot.shutdown_event)
+    _setup_signal_handlers(bot)
 
     try:
-        # Запуск бота с обработкой исключений
+        # Запуск бота
         await bot.run()
+
     except KeyboardInterrupt:
         bot.logger.info("Получен KeyboardInterrupt, завершение работы...")
+
     except Exception as e:
         bot.logger.error(f"Критическая ошибка в main(): {e}", exc_info=True)
+
     finally:
         # Принудительное закрытие
         try:
-            await bot.close()
+            if not bot.api_client.session.closed:
+                await bot.close()
         except Exception as e:
             logging.error(f"Ошибка при финальном закрытии: {e}")
 
@@ -158,13 +175,20 @@ async def main():
 if __name__ == "__main__":
     # Настройка политики событийного цикла для Windows
     if sys.platform.startswith('win'):
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        try:
+            # Python 3.8+
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except AttributeError:
+            # Старые версии Python
+            pass
 
     try:
         # Запуск основного цикла
         asyncio.run(main())
+
     except KeyboardInterrupt:
         print("\n🛑 Программа остановлена пользователем")
+
     except Exception as e:
         logging.error(f"Критическая ошибка при запуске: {e}", exc_info=True)
         sys.exit(1)
