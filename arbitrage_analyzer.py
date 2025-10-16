@@ -20,16 +20,22 @@ class ArbitrageAnalyzer:
 
         # Получаем данные
         bybit_prices = self.bybit.get_all_tickers()
-        bc_pairs = self.bestchange.get_exchange_pairs()
+        bc_pairs = self.bestchange.get_crypto_to_crypto_pairs()
 
-        if not bybit_prices or not bc_pairs:
-            print("✗ Недостаточно данных для анализа")
+        if not bybit_prices:
+            print("✗ Не удалось получить цены с Bybit")
+            return []
+
+        if not bc_pairs:
+            print("✗ Не удалось получить пары с BestChange")
             return []
 
         opportunities = []
         checked = 0
 
-        print(f"\n[Анализ] Проверка связок...")
+        print(f"\n[Анализ] Bybit: {len(bybit_prices)} торговых пар")
+        print(f"[Анализ] BestChange: {len(bc_pairs)} криптовалют с обменами")
+        print(f"[Анализ] Проверка арбитражных связок...\n")
 
         # Проходим по всем возможным связкам
         for crypto1, price1 in bybit_prices.items():
@@ -37,22 +43,25 @@ class ArbitrageAnalyzer:
                 if crypto1 == crypto2:
                     continue
 
-                checked += 1
-
                 # Проверяем есть ли пара на BestChange
                 if crypto1 in bc_pairs and crypto2 in bc_pairs[crypto1]:
-                    for offer in bc_pairs[crypto1][crypto2]:
-                        result = self._calculate_profit(
-                            crypto1, crypto2,
-                            price1, price2,
-                            offer
-                        )
+                    # Берём только лучшее предложение (они уже отсортированы)
+                    best_offer = bc_pairs[crypto1][crypto2][0]
 
-                        if result and result['profit_percent'] >= Config.MIN_PROFIT_PERCENT:
-                            opportunities.append(result)
+                    checked += 1
 
-        print(f"[Анализ] ✓ Проверено {checked} связок")
-        print(f"[Анализ] ✓ Найдено {len(opportunities)} возможностей")
+                    result = self._calculate_profit(
+                        crypto1, crypto2,
+                        price1, price2,
+                        best_offer
+                    )
+
+                    if result and result['profit_percent'] >= Config.MIN_PROFIT_PERCENT:
+                        opportunities.append(result)
+                        print(f"[Найдено] {crypto1}→{crypto2}: +{result['profit_percent']}% (${result['net_profit']})")
+
+        print(f"\n[Анализ] ✓ Проверено {checked} связок")
+        print(f"[Анализ] ✓ Найдено {len(opportunities)} прибыльных возможностей")
 
         # Сортируем по прибыли
         opportunities.sort(key=lambda x: x['profit_percent'], reverse=True)
@@ -80,29 +89,66 @@ class ArbitrageAnalyzer:
 
         start_usdt = Config.MIN_AMOUNT_USD
 
-        # Шаг 1: Покупаем crypto1 на Bybit
-        amount_crypto1 = start_usdt / price1
+        # ============================================
+        # ШАГ 1: Покупаем crypto1 на Bybit
+        # ============================================
+        bybit_buy_fee = start_usdt * Config.BYBIT_TRADING_FEE
+        usdt_after_buy_fee = start_usdt - bybit_buy_fee
+        amount_crypto1 = usdt_after_buy_fee / price1
+
+        # ============================================
+        # ШАГ 2: Отправляем на BestChange
+        # ============================================
+        # Здесь нужна комиссия сети для crypto1
+        withdrawal_fee_crypto1 = Config.WITHDRAWAL_FEE_USD / price1  # в единицах crypto1
+        amount_crypto1_after_withdrawal = amount_crypto1 - withdrawal_fee_crypto1
+
+        if amount_crypto1_after_withdrawal <= 0:
+            return None  # комиссия съела всё
+
+        # ============================================
+        # ШАГ 3: Меняем crypto1 → crypto2 на обменнике
+        # ============================================
+        amount_crypto2 = amount_crypto1_after_withdrawal * bc_offer['rate']
 
         # Проверяем резерв обменника
-        if bc_offer['reserve'] > 0:
-            expected_crypto2 = amount_crypto1 * bc_offer['rate']
-            if bc_offer['reserve'] < expected_crypto2:
-                return None  # недостаточный резерв
+        if bc_offer['reserve'] > 0 and amount_crypto2 > bc_offer['reserve']:
+            return None  # недостаточный резерв
 
-        # Шаг 2: Меняем на обменнике crypto1 → crypto2
-        amount_crypto2 = amount_crypto1 * bc_offer['rate']
+        # ============================================
+        # ШАГ 4: Отправляем crypto2 обратно на Bybit
+        # ============================================
+        deposit_fee_crypto2 = Config.DEPOSIT_FEE_USD / price2  # в единицах crypto2
+        amount_crypto2_after_deposit = amount_crypto2 - deposit_fee_crypto2
 
-        # Шаг 3: Продаем crypto2 на Bybit
-        final_usdt = amount_crypto2 * price2
+        if amount_crypto2_after_deposit <= 0:
+            return None  # комиссия съела всё
 
-        # Рассчитываем комиссии
-        bybit_buy_fee = start_usdt * Config.BYBIT_TRADING_FEE
-        bybit_sell_fee = final_usdt * Config.BYBIT_TRADING_FEE
-        network_fees = Config.WITHDRAWAL_FEE_USD + Config.DEPOSIT_FEE_USD
+        # ============================================
+        # ШАГ 5: Продаем crypto2 на Bybit
+        # ============================================
+        usdt_from_sell = amount_crypto2_after_deposit * price2
+        bybit_sell_fee = usdt_from_sell * Config.BYBIT_TRADING_FEE
+        final_usdt = usdt_from_sell - bybit_sell_fee
 
-        total_fees = bybit_buy_fee + bybit_sell_fee + network_fees
-        net_profit = final_usdt - start_usdt - total_fees
+        # ============================================
+        # РАСЧЁТ ПРИБЫЛИ
+        # ============================================
+        total_fees = bybit_buy_fee + bybit_sell_fee + Config.WITHDRAWAL_FEE_USD + Config.DEPOSIT_FEE_USD
+        net_profit = final_usdt - start_usdt
         profit_percent = (net_profit / start_usdt) * 100
+
+        # ============================================
+        # СРАВНЕНИЕ С ПРЯМЫМ ОБМЕНОМ НА BYBIT
+        # ============================================
+        # Если бы мы просто обменяли crypto1 → crypto2 → USDT на Bybit
+        direct_crypto2 = amount_crypto1 * (price1 / price2)  # сколько crypto2 получим напрямую
+        direct_usdt = direct_crypto2 * price2
+        direct_fees = start_usdt * Config.BYBIT_TRADING_FEE * 2  # две сделки
+        direct_profit = direct_usdt - start_usdt - direct_fees
+
+        # Арбитраж выгоден только если прибыль через BestChange больше прямого обмена
+        advantage_over_direct = net_profit - direct_profit
 
         return {
             'timestamp': datetime.now().isoformat(),
@@ -117,48 +163,64 @@ class ArbitrageAnalyzer:
             'profit_percent': round(profit_percent, 2),
             'total_fees': round(total_fees, 2),
 
+            # Сравнение с прямым обменом
+            'direct_exchange_profit': round(direct_profit, 2),
+            'advantage_over_direct': round(advantage_over_direct, 2),
+            'is_better_than_direct': advantage_over_direct > 0,
+
             # Детали обмена - Шаг 1: Покупка на Bybit
             'step1_buy_crypto1': {
                 'crypto': crypto1,
-                'amount': round(amount_crypto1, 8),
+                'amount_before_withdrawal': round(amount_crypto1, 8),
+                'amount_after_withdrawal': round(amount_crypto1_after_withdrawal, 8),
                 'price_usdt': round(price1, 8),
                 'total_usdt': round(start_usdt, 2),
-                'fee': round(bybit_buy_fee, 2)
+                'trading_fee': round(bybit_buy_fee, 2),
+                'withdrawal_fee_usd': round(Config.WITHDRAWAL_FEE_USD, 2),
+                'withdrawal_fee_crypto': round(withdrawal_fee_crypto1, 8)
             },
 
             # Детали обмена - Шаг 2: Обмен на BestChange
             'step2_exchange': {
                 'from_crypto': crypto1,
-                'from_amount': round(amount_crypto1, 8),
+                'from_amount': round(amount_crypto1_after_withdrawal, 8),
                 'to_crypto': crypto2,
                 'to_amount': round(amount_crypto2, 8),
                 'rate': round(bc_offer['rate'], 8),
                 'exchanger_name': bc_offer['exchanger'],
                 'exchanger_id': bc_offer['exchanger_id'],
-                'reserve': round(bc_offer['reserve'], 2)
+                'reserve': round(bc_offer['reserve'], 2),
+                'min_give': round(bc_offer['give'], 8),
+                'max_receive': round(bc_offer['receive'], 8)
             },
 
             # Детали обмена - Шаг 3: Продажа на Bybit
             'step3_sell_crypto2': {
                 'crypto': crypto2,
-                'amount': round(amount_crypto2, 8),
+                'amount_before_deposit': round(amount_crypto2, 8),
+                'amount_after_deposit': round(amount_crypto2_after_deposit, 8),
                 'price_usdt': round(price2, 8),
                 'total_usdt': round(final_usdt, 2),
-                'fee': round(bybit_sell_fee, 2)
+                'trading_fee': round(bybit_sell_fee, 2),
+                'deposit_fee_usd': round(Config.DEPOSIT_FEE_USD, 2),
+                'deposit_fee_crypto': round(deposit_fee_crypto2, 8)
             },
 
             # Текущие цены для проверки в момент выполнения
             'current_prices': {
                 f'{crypto1}_usdt': round(price1, 8),
                 f'{crypto2}_usdt': round(price2, 8),
-                f'{crypto1}_to_{crypto2}_rate': round(bc_offer['rate'], 8)
+                f'{crypto1}_to_{crypto2}_rate_bestchange': round(bc_offer['rate'], 8),
+                f'{crypto1}_to_{crypto2}_rate_bybit': round(price1 / price2, 8)
             },
 
             # Дополнительная информация
             'warnings': [
-                "Проверьте лимиты обменника перед выполнением",
-                "Учтите время подтверждения транзакций в блокчейне",
-                "Цены могут измениться за время выполнения операции",
-                "Комиссии сети указаны приблизительно"
+                "⚠️ Проверьте лимиты обменника перед выполнением",
+                "⚠️ Учтите время подтверждения транзакций (может быть 10-30 минут)",
+                "⚠️ Цены могут измениться за время выполнения операции",
+                "⚠️ Комиссии сети указаны приблизительно - проверьте актуальные",
+                "⚠️ Убедитесь что резерв обменника достаточен",
+                f"{'✅' if advantage_over_direct > 0 else '❌'} Выгоднее чем прямой обмен на Bybit на ${abs(advantage_over_direct):.2f}"
             ]
         }
