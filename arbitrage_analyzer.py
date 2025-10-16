@@ -1,3 +1,4 @@
+# arbitrage_analyzer.py
 from typing import List, Dict, Optional
 from datetime import datetime
 from configs import Config
@@ -168,7 +169,8 @@ class ArbitrageAnalyzer:
         # Если бы мы просто обменяли crypto1 → crypto2 → USDT на Bybit
         direct_crypto2 = amount_crypto1 * (price1 / price2)  # сколько crypto2 получим напрямую
         direct_usdt = direct_crypto2 * price2
-        direct_fees = start_usdt * Config.BYBIT_TRADING_FEE * 2  # две сделки
+        # более корректная аппроксимация: комиссия на покупку (start_usdt) и на продажу (direct_usdt)
+        direct_fees = (start_usdt * Config.BYBIT_TRADING_FEE) + (direct_usdt * Config.BYBIT_TRADING_FEE)
         direct_profit = direct_usdt - start_usdt - direct_fees
 
         # Арбитраж выгоден только если прибыль через BestChange больше прямого обмена

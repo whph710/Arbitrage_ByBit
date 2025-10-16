@@ -7,81 +7,58 @@ class BybitHandler:
     """Обработчик данных Bybit API"""
 
     def __init__(self):
-        self.base_url = Config.BYBIT_TESTNET_URL if Config.USE_TESTNET else Config.BYBIT_BASE_URL
+        self.base_url = Config.CURRENT_BYBIT_URL
         self.api_key = Config.BYBIT_API_KEY
         self.api_secret = Config.BYBIT_API_SECRET
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/1.0)',
+            'Accept': 'application/json'
+        }
+        self.timeout = Config.REQUEST_TIMEOUT
 
     def get_all_tickers(self) -> Dict[str, float]:
         """
-        Получает все торговые пары и их цены с Bybit
-
-        Returns:
-            {symbol: price_in_usdt} например {'BTC': 67500.0, 'ETH': 3500.0}
+        Получает все торговые пары с суффиксом USDT и их цены.
+        Возвращает словарь: {'BTC': 67500.0, 'ETH': 3500.0, ...}
         """
         try:
             print("[Bybit] Получение тикеров...")
 
-            # Получаем все USDT пары
             url = f"{self.base_url}/v5/market/tickers"
-            params = {
-                'category': 'spot'
-            }
+            params = {'category': 'spot'}
 
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(url, params=params, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
 
             data = response.json()
-
-            if data.get('retCode') != 0:
-                print(f"[Bybit] ✗ Ошибка API: {data.get('retMsg')}")
+            ret_code = data.get('retCode', data.get('ret_code', None))
+            if ret_code is not None and int(ret_code) != 0:
+                print(f"[Bybit] ✗ Ошибка API: {data.get('retMsg') or data.get('ret_msg')}")
                 return {}
 
             tickers = {}
-            for ticker in data.get('result', {}).get('list', []):
-                symbol = ticker.get('symbol', '')
+            result_list = []
+            if isinstance(data.get('result'), dict):
+                result_list = data['result'].get('list', [])
+            elif isinstance(data.get('result'), list):
+                result_list = data['result']
 
-                # Берём только USDT пары
-                if symbol.endswith('USDT'):
-                    crypto = symbol.replace('USDT', '')
-                    last_price = float(ticker.get('lastPrice', 0))
+            for ticker in result_list:
+                symbol = ticker.get('symbol', '').replace('/', '').upper()
+                if not symbol.endswith('USDT'):
+                    continue
 
-                    if last_price > 0:
-                        tickers[crypto] = last_price
+                base = symbol[:-4]
+                try:
+                    price = float(ticker.get('lastPrice', ticker.get('last_price', 0)))
+                    if price > 0:
+                        tickers[base] = price
+                except Exception:
+                    continue
 
-            print(f"[Bybit] ✓ Загружено {len(tickers)} торговых пар")
+            print(f"[Bybit] ✓ Загружено {len(tickers)} торговых пар USDT")
             return tickers
 
         except Exception as e:
             print(f"[Bybit] ✗ Ошибка: {e}")
             return {}
-
-    def get_ticker_price(self, symbol: str) -> float:
-        """
-        Получает цену конкретной пары
-
-        Args:
-            symbol: символ криптовалюты (например 'BTC')
-
-        Returns:
-            цена в USDT
-        """
-        try:
-            url = f"{self.base_url}/v5/market/tickers"
-            params = {
-                'category': 'spot',
-                'symbol': f"{symbol}USDT"
-            }
-
-            response = requests.get(url, params=params, timeout=10)
-            data = response.json()
-
-            if data.get('retCode') == 0:
-                result = data.get('result', {}).get('list', [])
-                if result:
-                    return float(result[0].get('lastPrice', 0))
-
-            return 0.0
-
-        except Exception as e:
-            print(f"[Bybit] Ошибка получения цены {symbol}: {e}")
-            return 0.0

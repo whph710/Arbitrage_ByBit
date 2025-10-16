@@ -1,3 +1,4 @@
+# configs.py
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -20,14 +21,9 @@ class Config:
     # ════════════════════════════════════════════════════════════════
 
     # Минимальный процент прибыли для отображения возможности
-    # Рекомендуется: 0.5% - 2%
-    # Слишком низкое значение покажет много нереалистичных возможностей
-    # Слишком высокое - пропустит реальные шансы
     MIN_PROFIT_PERCENT = float(os.getenv('MIN_PROFIT_PERCENT', '0.5'))
 
     # Начальная сумма для расчёта в USD
-    # Большие суммы обычно получают лучшие курсы
-    # Но учитывайте риски и доступный капитал
     MIN_AMOUNT_USD = float(os.getenv('MIN_AMOUNT_USD', '100'))
 
     # Сколько лучших возможностей показывать и сохранять
@@ -38,18 +34,12 @@ class Config:
     # ════════════════════════════════════════════════════════════════
 
     # Торговая комиссия Bybit (0.1% = 0.001)
-    # Spot trading fee для обычных пользователей
     BYBIT_TRADING_FEE = 0.001
 
     # Примерная комиссия за вывод с биржи (в USD)
-    # ВНИМАНИЕ: Реальные комиссии отличаются для каждой монеты!
-    # BTC: ~$5-15, ETH: ~$2-10, USDT TRC20: ~$1-2
-    # Проверяйте актуальные комиссии на Bybit перед запуском
     WITHDRAWAL_FEE_USD = float(os.getenv('WITHDRAWAL_FEE_USD', '3.0'))
 
     # Примерная комиссия за депозит на биржу (в USD)
-    # Обычно депозиты бесплатны, но учитываем комиссию сети
-    # Для быстрых транзакций может потребоваться больше
     DEPOSIT_FEE_USD = float(os.getenv('DEPOSIT_FEE_USD', '2.0'))
 
     # ════════════════════════════════════════════════════════════════
@@ -65,35 +55,21 @@ class Config:
     # BESTCHANGE API
     # ════════════════════════════════════════════════════════════════
 
-    # URL для загрузки данных BestChange (ZIP архив)
     BESTCHANGE_API_URL = "http://api.bestchange.ru/info.zip"
-
-    # Время кэширования данных в секундах
-    # BestChange обновляет данные каждые 10-15 секунд
     BESTCHANGE_CACHE_SECONDS = 15
 
     # ════════════════════════════════════════════════════════════════
     # BYBIT API
     # ════════════════════════════════════════════════════════════════
 
-    # Production API
     BYBIT_BASE_URL = "https://api.bybit.com"
-
-    # Testnet API (для тестирования без реальных денег)
     BYBIT_TESTNET_URL = "https://api-testnet.bybit.com"
-
-    # Использовать ли testnet (True) или production (False)
     USE_TESTNET = os.getenv('USE_TESTNET', 'False').lower() == 'true'
-
-    # Текущий URL в зависимости от режима
     CURRENT_BYBIT_URL = BYBIT_TESTNET_URL if USE_TESTNET else BYBIT_BASE_URL
 
     # ════════════════════════════════════════════════════════════════
     # ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ
     # ════════════════════════════════════════════════════════════════
 
-    # Максимальное время ожидания запроса (секунды)
     REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))
-
-    # Показывать ли детальные логи
     VERBOSE_LOGGING = os.getenv('VERBOSE_LOGGING', 'False').lower() == 'true'
