@@ -35,12 +35,36 @@ class ArbitrageAnalyzer:
 
         print(f"\n[Анализ] Bybit: {len(bybit_prices)} торговых пар")
         print(f"[Анализ] BestChange: {len(bc_pairs)} криптовалют с обменами")
+
+        # Показываем примеры для отладки
+        if bybit_prices:
+            bybit_sample = sorted(list(bybit_prices.keys()))[:15]
+            print(f"[Анализ] Примеры Bybit: {', '.join(bybit_sample)}")
+
+        if bc_pairs:
+            bc_sample = sorted(list(bc_pairs.keys()))[:15]
+            print(f"[Анализ] Примеры BestChange: {', '.join(bc_sample)}")
+
+        # Находим общие криптовалюты
+        common_cryptos = set(bybit_prices.keys()) & set(bc_pairs.keys())
+        print(f"[Анализ] Общих криптовалют: {len(common_cryptos)}")
+        if common_cryptos:
+            common_sample = sorted(list(common_cryptos))[:10]
+            print(f"[Анализ] Примеры общих: {', '.join(common_sample)}")
+
         print(f"[Анализ] Проверка арбитражных связок...\n")
 
         # Проходим по всем возможным связкам
-        for crypto1, price1 in bybit_prices.items():
-            for crypto2, price2 in bybit_prices.items():
+        for crypto1 in common_cryptos:
+            for crypto2 in common_cryptos:
                 if crypto1 == crypto2:
+                    continue
+
+                # Получаем цены с Bybit
+                price1 = bybit_prices.get(crypto1)
+                price2 = bybit_prices.get(crypto2)
+
+                if not price1 or not price2:
                     continue
 
                 # Проверяем есть ли пара на BestChange

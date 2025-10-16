@@ -16,6 +16,60 @@ class BestChangeHandler:
         self.rates = []
         self.last_update = None
 
+        # Маппинг полных названий к тикерам
+        self.crypto_mapping = {
+            'BITCOIN': 'BTC',
+            'ETHEREUM': 'ETH',
+            'TETHER': 'USDT',
+            'RIPPLE': 'XRP',
+            'LITECOIN': 'LTC',
+            'CARDANO': 'ADA',
+            'DOGECOIN': 'DOGE',
+            'POLKADOT': 'DOT',
+            'BINANCE COIN': 'BNB',
+            'STELLAR': 'XLM',
+            'CHAINLINK': 'LINK',
+            'UNISWAP': 'UNI',
+            'SOLANA': 'SOL',
+            'POLYGON': 'MATIC',
+            'AVALANCHE': 'AVAX',
+            'COSMOS': 'ATOM',
+            'MONERO': 'XMR',
+            'TRON': 'TRX',
+            'DASH': 'DASH',
+            'ZCASH': 'ZEC',
+            'TEZOS': 'XTZ',
+            'NEO': 'NEO',
+            'MAKER': 'MKR',
+            'AAVE': 'AAVE',
+            'ALGORAND': 'ALGO',
+            'EOS': 'EOS',
+            'FILECOIN': 'FIL',
+            'BITCOIN CASH': 'BCH',
+            'ETHEREUM CLASSIC': 'ETC',
+            'VECHAIN': 'VET',
+            'THETA': 'THETA',
+            'ELROND': 'EGLD',
+            'KUSAMA': 'KSM',
+            'SHIBA INU': 'SHIB',
+            'FANTOM': 'FTM',
+            'NEAR': 'NEAR',
+            'HARMONY': 'ONE',
+            'HEDERA': 'HBAR',
+            'DECENTRALAND': 'MANA',
+            'SANDBOX': 'SAND',
+            'AXIE INFINITY': 'AXS',
+            'APECOIN': 'APE',
+            'OPTIMISM': 'OP',
+            'ARBITRUM': 'ARB',
+            'INJECTIVE': 'INJ',
+            'SUI': 'SUI',
+            'PEPE': 'PEPE',
+            'STACKS': 'STX',
+            'TON': 'TON',
+            'TELEGRAM': 'TON',
+        }
+
     def update_data(self) -> bool:
         """Загружает свежие данные с BestChange"""
         try:
@@ -113,37 +167,64 @@ class BestChangeHandler:
         if not name:
             return ''
 
-        name = name.upper()
+        original_name = name
+        name = name.upper().strip()
 
-        # Удаляем типы сетей
+        # Шаг 1: Сначала проверяем скобки - там обычно короткий код
+        if '(' in name and ')' in name:
+            try:
+                start = name.index('(') + 1
+                end = name.index(')')
+                code = name[start:end].strip()
+                # Берём только если это похоже на криптовалютный код
+                if code and 2 <= len(code) <= 10 and code.replace('-', '').isalnum():
+                    return code
+            except (ValueError, IndexError):
+                pass
+
+        # Шаг 2: Удаляем типы сетей
         networks = [
+            ' TRC20', ' TRC-20', ' TRC',
+            ' ERC20', ' ERC-20', ' ERC',
+            ' BEP20', ' BEP-20', ' BEP',
+            ' SOL', ' SOLANA',
+            ' OMNI',
+            ' ARBITRUM',
+            ' POLYGON',
+            ' AVALANCHE',
+            ' BSC', ' BINANCE SMART CHAIN',
+            ' BNB CHAIN',
             'TRC20', 'TRC-20', 'TRC',
             'ERC20', 'ERC-20', 'ERC',
             'BEP20', 'BEP-20', 'BEP',
-            'SOL', 'SOLANA',
-            'OMNI',
-            'ARBITRUM', 'ARB',
-            'POLYGON', 'MATIC',
-            'AVALANCHE', 'AVAX',
-            'BSC', 'BINANCE SMART CHAIN'
         ]
 
         for network in networks:
-            name = name.replace(network, '')
+            name = name.replace(network, ' ')
 
-        # Убираем скобки и берём код из них
-        # "Bitcoin (BTC)" -> "BTC"
-        if '(' in name and ')' in name:
-            start = name.index('(') + 1
-            end = name.index(')')
-            code = name[start:end].strip()
-            if code and len(code) <= 10:  # разумная длина для кода
-                name = code
-
-        # Очищаем от лишних символов
+        # Шаг 3: Очищаем от лишних символов
         name = name.strip(' ()-_,.')
+        name = ' '.join(name.split())  # Убираем множественные пробелы
 
-        return name
+        # Шаг 4: Проверяем маппинг полных названий
+        # Проверяем начало строки (может быть "BITCOIN CODE" -> должен найти "BITCOIN")
+        for full_name, ticker in self.crypto_mapping.items():
+            if name.startswith(full_name):
+                return ticker
+
+        # Шаг 5: Если получилось длинное название, берём первое слово
+        if len(name) > 10 and ' ' in name:
+            first_word = name.split()[0]
+            # Проверяем первое слово в маппинге
+            if first_word in self.crypto_mapping:
+                return self.crypto_mapping[first_word]
+            return first_word
+
+        # Шаг 6: Последняя проверка - может это уже тикер?
+        if 2 <= len(name) <= 10:
+            return name
+
+        return ''
 
     def get_crypto_to_crypto_pairs(self) -> Dict[str, Dict[str, List[Dict]]]:
         """
@@ -172,11 +253,17 @@ class BestChangeHandler:
 
         # Список фиатных валют для исключения
         fiat_keywords = [
-            'RUB', 'USD', 'EUR', 'GBP', 'UAH', 'KZT', 'BYN',
-            'QIWI', 'YANDEX', 'SBERBANK', 'TINKOFF', 'ALFABANK',
-            'PAYEER', 'PERFECT MONEY', 'WEBMONEY', 'ADVCASH',
-            'VISA', 'MASTERCARD', 'MIR', 'CASH'
+            'RUB', 'USD', 'EUR', 'GBP', 'UAH', 'KZT', 'BYN', 'CNY', 'JPY',
+            'QIWI', 'YANDEX', 'SBERBANK', 'TINKOFF', 'ALFABANK', 'VTB',
+            'PAYEER', 'PERFECT MONEY', 'WEBMONEY', 'ADVCASH', 'PAYPAL',
+            'VISA', 'MASTERCARD', 'MIR', 'CASH', 'WIRE', 'SEPA', 'BANK',
+            'RUBLE', 'DOLLAR', 'EURO', 'YUAN',
         ]
+
+        processed_count = 0
+        skipped_fiat = 0
+        skipped_same = 0
+        skipped_empty = 0
 
         for rate in self.rates:
             from_name = self.currencies.get(rate['from_id'], '')
@@ -190,10 +277,12 @@ class BestChangeHandler:
 
             # Пропускаем пустые
             if not from_code or not to_code:
+                skipped_empty += 1
                 continue
 
             # Пропускаем одинаковые
             if from_code == to_code:
+                skipped_same += 1
                 continue
 
             # Пропускаем если это фиат
@@ -202,8 +291,13 @@ class BestChangeHandler:
                 if fiat in from_code.upper() or fiat in to_code.upper():
                     is_fiat = True
                     break
+                # Проверяем также исходные названия
+                if fiat in from_name.upper() or fiat in to_name.upper():
+                    is_fiat = True
+                    break
 
             if is_fiat:
+                skipped_fiat += 1
                 continue
 
             # Создаём структуру
@@ -225,6 +319,7 @@ class BestChangeHandler:
                     'give': rate['give'],
                     'receive': rate['receive']
                 })
+                processed_count += 1
 
         # Сортируем по лучшему курсу
         for from_crypto in pairs:
@@ -233,6 +328,22 @@ class BestChangeHandler:
                     key=lambda x: x['rate'],
                     reverse=True
                 )
+
+        # Отладочная информация
+        print(f"[BestChange] Обработано курсов: {processed_count}")
+        print(f"[BestChange] Пропущено: фиат={skipped_fiat}, одинаковые={skipped_same}, пустые={skipped_empty}")
+        print(f"[BestChange] Найдено крипто-пар: {len(pairs)}")
+
+        if len(pairs) > 0:
+            # Показываем первые 15 криптовалют
+            sample_cryptos = sorted(list(pairs.keys()))[:15]
+            print(f"[BestChange] Примеры криптовалют: {', '.join(sample_cryptos)}")
+
+            # Показываем несколько примеров пар для первой криптовалюты
+            first_crypto = sample_cryptos[0]
+            if first_crypto in pairs:
+                pairs_for_first = list(pairs[first_crypto].keys())[:5]
+                print(f"[BestChange] Пары для {first_crypto}: {', '.join(pairs_for_first)}")
 
         return pairs
 
