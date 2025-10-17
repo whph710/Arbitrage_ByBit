@@ -1,72 +1,65 @@
-import requests
+import aiohttp
 from typing import Dict
-from configs import Config
+from configs import BYBIT_API_URL, REQUEST_TIMEOUT
 
 
-class BybitHandler:
-    """Обработчик данных Bybit API"""
+class BybitClientAsync:
+    """Асинхронный клиент для Bybit API"""
 
     def __init__(self):
-        self.base_url = Config.CURRENT_BYBIT_URL
-        self.api_key = Config.BYBIT_API_KEY
-        self.api_secret = Config.BYBIT_API_SECRET
+        self.base_url = BYBIT_API_URL
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/1.0)',
+            'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/2.0)',
             'Accept': 'application/json'
         }
-        self.timeout = Config.REQUEST_TIMEOUT
+        self.timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+        self.session = None
 
-    def get_all_tickers(self) -> Dict[str, float]:
-        """
-        Получает все торговые пары с суффиксом USDT и их цены.
-        Фильтрует только разрешенные монеты из Config.ALLOWED_COINS.
-        Возвращает словарь: {'BTC': 67500.0, 'ETH': 3500.0, ...}
-        """
+    async def __aenter__(self):
+        await self.create_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def create_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession(headers=self.headers, timeout=self.timeout)
+
+    async def close(self):
+        if self.session:
+            await self.session.close()
+            self.session = None
+
+    async def get_usdt_tickers(self) -> Dict[str, float]:
+        """Получает все USDT-пары с Bybit"""
+        if self.session is None:
+            await self.create_session()
+
         try:
-            print("[Bybit] Получение тикеров...")
-
             url = f"{self.base_url}/v5/market/tickers"
             params = {'category': 'spot'}
-
-            response = requests.get(url, params=params, headers=self.headers, timeout=self.timeout)
-            response.raise_for_status()
-
-            data = response.json()
-            ret_code = data.get('retCode', data.get('ret_code', None))
-            if ret_code is not None and int(ret_code) != 0:
-                print(f"[Bybit] ✗ Ошибка API: {data.get('retMsg') or data.get('ret_msg')}")
-                return {}
+            async with self.session.get(url, params=params) as response:
+                response.raise_for_status()
+                data = await response.json()
 
             tickers = {}
-            result_list = []
-            if isinstance(data.get('result'), dict):
-                result_list = data['result'].get('list', [])
-            elif isinstance(data.get('result'), list):
-                result_list = data['result']
+            result_list = data.get('result', {}).get('list', [])
 
             for ticker in result_list:
                 symbol = ticker.get('symbol', '').replace('/', '').upper()
                 if not symbol.endswith('USDT'):
                     continue
-
                 base = symbol[:-4]
-
-                # ФИЛЬТРАЦИЯ: Проверяем что монета в списке разрешенных
-                if base not in Config.ALLOWED_COINS:
-                    continue
-
                 try:
-                    price = float(ticker.get('lastPrice', ticker.get('last_price', 0)))
+                    price = float(ticker.get('lastPrice', 0))
                     if price > 0:
                         tickers[base] = price
-                except Exception:
+                except (ValueError, TypeError):
                     continue
 
-            print(f"[Bybit] ✓ Загружено {len(tickers)} разрешенных торговых пар USDT")
-            if tickers:
-                print(f"[Bybit] ✓ Найденные монеты: {', '.join(sorted(tickers.keys()))}")
             return tickers
 
         except Exception as e:
-            print(f"[Bybit] ✗ Ошибка: {e}")
+            print(f"[Bybit] Ошибка: {e}")
             return {}
