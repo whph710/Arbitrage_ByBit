@@ -222,6 +222,30 @@ class BestChangeClientAsync:
                         })
                     except (ValueError, TypeError, KeyError) as e:
                         continue
+        # bestchange_handler.py
+        # Внутри класса BestChangeClientAsync __init__:
+
+        from configs import BESTCHANGE_API_KEY, MAX_CONCURRENT_REQUESTS, REQUEST_DELAY
+
+        class BestChangeClientAsync:
+            def __init__(self):
+                if not BESTCHANGE_API_KEY:
+                    raise ValueError("BESTCHANGE_API_KEY не задан в configs.py или .env файле")
+
+                self.api_key = BESTCHANGE_API_KEY
+                self.base_url = "https://bestchange.app"
+                self.lang = "en"
+
+                self.currencies: Dict[int, Dict] = {}
+                self.crypto_currencies: Dict[str, int] = {}
+                self.changers: Dict[int, Dict] = {}
+                self.rates: Dict[str, Dict[str, List[Dict]]] = {}
+
+                self.max_concurrent_requests = MAX_CONCURRENT_REQUESTS
+                self.request_delay = REQUEST_DELAY
+                self.max_retries = 2
+                self.session: Optional[aiohttp.ClientSession] = None
+                self.timeout = aiohttp.ClientTimeout(total=15)
 
         # Сортируем по курсу (лучший сверху)
         for to_code in pairs:
