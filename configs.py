@@ -20,6 +20,15 @@ class Config:
     # ПАРАМЕТРЫ АРБИТРАЖА
     # ════════════════════════════════════════════════════════════════
 
+    # Разрешенные криптовалюты для торговли (топ ликвидные монеты)
+    ALLOWED_COINS = {
+        'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'XRP', 'ADA', 'SOL', 'DOGE',
+        'DOT', 'MATIC', 'LTC', 'SHIB', 'AVAX', 'TRX', 'LINK', 'BCH', 'XLM',
+        'UNI', 'ATOM', 'XMR', 'ETC', 'FIL', 'APT', 'NEAR', 'ARB', 'OP',
+        'TON', 'DAI', 'BUSD', 'TUSD', 'XTZ', 'ALGO', 'VET', 'ICP', 'HBAR',
+        'QNT', 'GRT', 'AAVE', 'MKR', 'SAND', 'MANA', 'AXS', 'THETA', 'FTM'
+    }
+
     # Минимальный процент разницы для отображения возможности
     # Большой спред компенсирует все комиссии
     MIN_PROFIT_PERCENT = float(os.getenv('MIN_PROFIT_PERCENT', '2.0'))

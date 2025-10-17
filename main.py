@@ -44,8 +44,11 @@ def print_opportunities(opportunities: list):
         print(f"   💵 Потенциальная прибыль: ${opp['potential_profit']} ({opp['spread_percent']}% спред)")
         print(f"   🏦 Обменник: {opp['step2_exchange']['exchanger_name']}")
         print(f"   📈 Курс BestChange: 1 {opp['crypto1']} = {opp['step2_exchange']['rate']:.8f} {opp['crypto2']}")
-        print(
-            f"   📊 Курс Bybit: 1 {opp['crypto1']} = {opp['rates_comparison'][f'{opp['crypto1']}_to_{opp['crypto2']}_bybit']:.8f} {opp['crypto2']}")
+
+        # Извлекаем ключ для rates_comparison
+        bybit_rate_key = f"{opp['crypto1']}_to_{opp['crypto2']}_bybit"
+        bybit_rate = opp['rates_comparison'][bybit_rate_key]
+        print(f"   📊 Курс Bybit: 1 {opp['crypto1']} = {bybit_rate:.8f} {opp['crypto2']}")
         print(f"   💎 Резерв: {opp['step2_exchange']['reserve']:.2f} {opp['crypto2']}")
 
         rate_diff = opp['rates_comparison']['rate_difference_percent']
@@ -91,10 +94,13 @@ def print_best_opportunity_details(best: dict):
 
     rates = best['rates_comparison']
     print(f"\n📊 СРАВНЕНИЕ КУРСОВ:")
-    print(
-        f"   BestChange: 1 {best['crypto1']} = {rates[f'{best['crypto1']}_to_{best['crypto2']}_bestchange']:.8f} {best['crypto2']}")
-    print(
-        f"   Bybit:      1 {best['crypto1']} = {rates[f'{best['crypto1']}_to_{best['crypto2']}_bybit']:.8f} {best['crypto2']}")
+
+    # Извлекаем ключи для rates_comparison
+    bestchange_rate_key = f"{best['crypto1']}_to_{best['crypto2']}_bestchange"
+    bybit_rate_key = f"{best['crypto1']}_to_{best['crypto2']}_bybit"
+
+    print(f"   BestChange: 1 {best['crypto1']} = {rates[bestchange_rate_key]:.8f} {best['crypto2']}")
+    print(f"   Bybit:      1 {best['crypto1']} = {rates[bybit_rate_key]:.8f} {best['crypto2']}")
     print(f"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print(f"   Разница:    {rates['rate_difference_percent']:+.2f}%")
 
