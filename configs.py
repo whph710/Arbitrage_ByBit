@@ -8,17 +8,33 @@ ENV_PATH = BASE_DIR / ".env"
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH)
 
-# Максимально допустимый курс (для фильтрации ошибочных данных)
-# MAX_REASONABLE_RATE = 100000
-
 # Максимальная прибыль в процентах (для фильтрации ошибок)
 MAX_REASONABLE_PROFIT = 50
 
 START_AMOUNT = float(os.getenv("START_AMOUNT", 100.0))
 MIN_SPREAD = float(os.getenv("MIN_SPREAD", 0.5))
 SHOW_TOP = int(os.getenv("SHOW_TOP", 10))
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 3))  # уменьшено
-REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", 0.5))  # новая переменная для задержки
+
+# ============================================================================
+# ОПТИМИЗИРОВАННЫЕ НАСТРОЙКИ ДЛЯ BESTCHANGE API
+# ============================================================================
+# Уменьшаем количество одновременных запросов с 10 до 2
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 2))
+
+# Увеличиваем задержку между запросами с 0.1 до 0.8 секунд
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", 0.8))
+
+# Размер пакета для batch загрузки (уменьшено с 100 до 50)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", 50))
+
+# Количество повторных попыток при ошибке
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
+
+# Задержка при повторной попытке (в секундах)
+RETRY_DELAY = float(os.getenv("RETRY_DELAY", 2.0))
+
+# Таймаут для запросов (увеличен с 15 до 30 секунд)
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 30))
 
 BYBIT_API_URL = os.getenv("BYBIT_API_URL", "https://api.bybit.com")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
@@ -26,7 +42,6 @@ BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
 BESTCHANGE_API_KEY = os.getenv("BESTCHANGE_API_KEY", "")
 BESTCHANGE_BASE_URL = os.getenv("BESTCHANGE_BASE_URL", "https://bestchange.app")
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 30))
 
 RESULTS_DIR = BASE_DIR / "results"
 LOGS_DIR = BASE_DIR / "logs"
@@ -42,6 +57,10 @@ if DEBUG:
     print(f"SHOW_TOP = {SHOW_TOP}")
     print(f"MAX_CONCURRENT_REQUESTS = {MAX_CONCURRENT_REQUESTS}")
     print(f"REQUEST_DELAY = {REQUEST_DELAY}")
+    print(f"BATCH_SIZE = {BATCH_SIZE}")
+    print(f"MAX_RETRIES = {MAX_RETRIES}")
+    print(f"RETRY_DELAY = {RETRY_DELAY}")
+    print(f"REQUEST_TIMEOUT = {REQUEST_TIMEOUT}")
     print(f"BYBIT_API_URL = {BYBIT_API_URL}")
     print(f"BESTCHANGE_API_KEY = {'***' if BESTCHANGE_API_KEY else 'NOT SET'}")
     print(f"BESTCHANGE_BASE_URL = {BESTCHANGE_BASE_URL}")
