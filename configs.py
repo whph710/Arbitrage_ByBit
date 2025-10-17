@@ -8,6 +8,12 @@ ENV_PATH = BASE_DIR / ".env"
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH)
 
+# Максимально допустимый курс (для фильтрации ошибочных данных)
+# MAX_REASONABLE_RATE = 100000
+
+# Максимальная прибыль в процентах (для фильтрации ошибок)
+MAX_REASONABLE_PROFIT = 50
+
 START_AMOUNT = float(os.getenv("START_AMOUNT", 100.0))
 MIN_SPREAD = float(os.getenv("MIN_SPREAD", 0.5))
 SHOW_TOP = int(os.getenv("SHOW_TOP", 10))

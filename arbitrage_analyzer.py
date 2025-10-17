@@ -43,7 +43,9 @@ class ArbitrageAnalyzerAsync:
             for coin_b in common_coins:
                 if coin_b == coin_a:
                     continue
-                if coin_b not in rates[coin_a]:
+
+                # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: проверяем направление обмена CoinA -> CoinB
+                if coin_a not in rates or coin_b not in rates.get(coin_a, {}):
                     continue
 
                 exch_list_ab = rates[coin_a][coin_b]
@@ -53,17 +55,42 @@ class ArbitrageAnalyzerAsync:
                 try:
                     checked_paths += 1
 
-                    # USDT -> CoinA на Bybit
-                    amount_a = start_amount / bybit_prices[coin_a]
+                    # Шаг 1: USDT -> CoinA на Bybit (покупаем CoinA)
+                    price_a = bybit_prices[coin_a]
+                    if price_a <= 0:
+                        continue
+                    amount_a = start_amount / price_a
 
-                    # CoinA -> CoinB на BestChange
+                    # Шаг 2: CoinA -> CoinB на BestChange
+                    # rate показывает: сколько CoinB вы ПОЛУЧИТЕ за 1 CoinA
                     best_rate_ab = exch_list_ab[0]['rate']
+
+                    # ВАЖНАЯ ПРОВЕРКА: курс должен быть разумным
+                    # Если курс слишком большой (>1000000), это может быть ошибка данных
+                    if best_rate_ab > 1000000:
+                        print(f"[Analyzer] ⚠️ Подозрительный курс {coin_a}→{coin_b}: {best_rate_ab:.2f} (пропускаем)")
+                        continue
+
+                    if best_rate_ab <= 0:
+                        continue
+
                     amount_b = amount_a * best_rate_ab
 
-                    # CoinB -> USDT на Bybit
+                    # Шаг 3: CoinB -> USDT на Bybit (продаем CoinB)
                     if coin_b not in bybit_prices:
                         continue
-                    final_usdt = amount_b * bybit_prices[coin_b]
+                    price_b = bybit_prices[coin_b]
+                    if price_b <= 0:
+                        continue
+
+                    final_usdt = amount_b * price_b
+
+                    # Дополнительная проверка на адекватность результата
+                    # Если итоговая сумма больше начальной в 1000+ раз, это явная ошибка
+                    if final_usdt > start_amount * 1000:
+                        print(f"[Analyzer] ⚠️ Неадекватный результат для {coin_a}→{coin_b}: "
+                              f"${start_amount:.2f} → ${final_usdt:.2f} (пропускаем)")
+                        continue
 
                     # Вычисляем спред
                     spread = ((final_usdt - start_amount) / start_amount) * 100
@@ -77,12 +104,22 @@ class ArbitrageAnalyzerAsync:
                             'profit': final_usdt - start_amount,
                             'spread': spread,
                             'steps': [
-                                f"1. Купить {coin_a} за {start_amount:.2f} USDT на Bybit (цена: {bybit_prices[coin_a]:.8f})",
+                                f"1. Купить {coin_a} за {start_amount:.2f} USDT на Bybit (цена: {price_a:.8f})",
                                 f"2. Обменять {amount_a:.8f} {coin_a} на {amount_b:.8f} {coin_b} через {exch_list_ab[0]['exchanger']} (курс: {best_rate_ab:.8f})",
-                                f"3. Продать {amount_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (цена: {bybit_prices[coin_b]:.8f})"
-                            ]
+                                f"3. Продать {amount_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (цена: {price_b:.8f})"
+                            ],
+                            # Добавляем детали для отладки
+                            'debug': {
+                                'bybit_price_a': price_a,
+                                'bybit_price_b': price_b,
+                                'bestchange_rate': best_rate_ab,
+                                'exchanger': exch_list_ab[0]['exchanger'],
+                                'reserve': exch_list_ab[0].get('reserve', 0)
+                            }
                         })
-                except (KeyError, ZeroDivisionError, TypeError):
+                except (KeyError, ZeroDivisionError, TypeError) as e:
+                    # Тихо пропускаем ошибки, но можно раскомментировать для отладки
+                    # print(f"[Analyzer] Ошибка при обработке {coin_a}→{coin_b}: {e}")
                     continue
 
         print(f"[Analyzer] Проверено путей: {checked_paths}")
@@ -102,6 +139,12 @@ class ArbitrageAnalyzerAsync:
                 print(f"    Детали:")
                 for step in opp['steps']:
                     print(f"       {step}")
+
+                # Показываем резерв обменника для первых 3 результатов
+                if idx <= 3 and 'debug' in opp:
+                    reserve = opp['debug'].get('reserve', 0)
+                    if reserve > 0:
+                        print(f"    💰 Резерв обменника: ${reserve:.2f}")
                 print()
         else:
             print(f"\n❌ Арбитражных возможностей со спредом >= {min_spread}% не найдено\n")
