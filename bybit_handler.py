@@ -19,6 +19,7 @@ class BybitHandler:
     def get_all_tickers(self) -> Dict[str, float]:
         """
         Получает все торговые пары с суффиксом USDT и их цены.
+        Фильтрует только разрешенные монеты из Config.ALLOWED_COINS.
         Возвращает словарь: {'BTC': 67500.0, 'ETH': 3500.0, ...}
         """
         try:
@@ -49,6 +50,11 @@ class BybitHandler:
                     continue
 
                 base = symbol[:-4]
+
+                # ФИЛЬТРАЦИЯ: Проверяем что монета в списке разрешенных
+                if base not in Config.ALLOWED_COINS:
+                    continue
+
                 try:
                     price = float(ticker.get('lastPrice', ticker.get('last_price', 0)))
                     if price > 0:
@@ -56,7 +62,9 @@ class BybitHandler:
                 except Exception:
                     continue
 
-            print(f"[Bybit] ✓ Загружено {len(tickers)} торговых пар USDT")
+            print(f"[Bybit] ✓ Загружено {len(tickers)} разрешенных торговых пар USDT")
+            if tickers:
+                print(f"[Bybit] ✓ Найденные монеты: {', '.join(sorted(tickers.keys()))}")
             return tickers
 
         except Exception as e:

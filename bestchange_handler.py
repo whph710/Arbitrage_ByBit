@@ -1,206 +1,161 @@
-import gzip
 import requests
-from typing import Dict, List, Set
-from io import BytesIO
+from typing import Dict, List, Set, Optional
 from configs import Config
 
 
 class BestChangeHandler:
-    """Парсер данных BestChange с умным сопоставлением тикеров"""
+    """Обработчик BestChange API v2.0 с сопоставлением тикеров Bybit"""
 
     def __init__(self):
-        self.base_url = "https://api.bestchange.ru/info.zip"
-        self.currencies = {}  # id -> полное название
-        self.currency_tickers = {}  # id -> тикер (BTC, ETH...)
-        self.exchangers = {}
-        self.rates = []
+        self.api_key = Config.BESTCHANGE_API_KEY
+        if not self.api_key:
+            raise ValueError("BESTCHANGE_API_KEY не найден в .env файле!")
 
-    def _download_data(self) -> bytes:
-        """Загружает ZIP файл с данными"""
+        self.base_url = "https://bestchange.app"
+        self.lang = "en"  # Используем английский для лучшего сопоставления
+
+        self.currencies = {}  # id -> полная информация о валюте
+        self.currency_tickers = {}  # id -> тикер (BTC, ETH...)
+        self.ticker_to_id = {}  # тикер -> id
+        self.changers = {}  # id -> название обменника
+        self.rates_cache = {}  # кеш курсов
+
+    def _make_request(self, endpoint: str) -> Optional[Dict]:
+        """Выполняет запрос к API BestChange"""
+        url = f"{self.base_url}/v2/{self.api_key}/{endpoint}"
+
         try:
-            print("[BestChange] Подключение к API...")
             response = requests.get(
-                self.base_url,
-                timeout=Config.REQUEST_TIMEOUT,
-                headers={'User-Agent': 'Mozilla/5.0'}
+                url,
+                headers={
+                    'Accept': 'application/json',
+                    'Accept-Encoding': 'gzip',
+                    'User-Agent': 'Mozilla/5.0'
+                },
+                timeout=Config.REQUEST_TIMEOUT
             )
             response.raise_for_status()
-            print("[BestChange] ✓ Данные получены")
-            return response.content
-        except requests.exceptions.Timeout:
-            print(f"[BestChange] ✗ Таймаут подключения ({Config.REQUEST_TIMEOUT}s)")
-            raise
+            return response.json()
+
         except requests.exceptions.RequestException as e:
-            print(f"[BestChange] ✗ Ошибка подключения: {e}")
-            raise
+            print(f"[BestChange] ✗ Ошибка запроса {endpoint}: {e}")
+            return None
 
     def load_data(self, bybit_tickers: Set[str] = None):
         """
-        Загружает данные BestChange и сопоставляет с тикерами Bybit
+        Загружает данные из BestChange API v2.0
 
         Args:
-            bybit_tickers: Множество тикеров из Bybit (например, {'BTC', 'ETH', 'USDT'})
+            bybit_tickers: Множество тикеров из Bybit для сопоставления
         """
-        print("[BestChange] Загрузка данных...")
-        raw = self._download_data()
-
-        with gzip.GzipFile(fileobj=BytesIO(raw)) as gz:
-            content = gz.read().decode("utf-8", errors="ignore")
-
-        sections = content.split("##########")
-
-        if len(sections) < 4:
-            raise ValueError("Неверный формат данных от BestChange")
+        print("[BestChange] Загрузка данных через API v2.0...")
 
         # ═══════════════════════════════════════════════════════════
-        # ШАГ 1: Парсим валюты и извлекаем тикеры
+        # ШАГ 1: Загружаем список валют
         # ═══════════════════════════════════════════════════════════
-        currencies_text = sections[1]
-        for line in currencies_text.strip().splitlines():
-            parts = line.split(";")
-            if len(parts) >= 3:
-                cid = int(parts[0])
-                name = parts[2].strip()
-                self.currencies[cid] = name
+        print("[BestChange] Загрузка валют...")
+        currencies_data = self._make_request(f"currencies/{self.lang}")
 
-                # Извлекаем тикер из названия
-                ticker = self._extract_ticker(name, bybit_tickers)
-                if ticker:
-                    self.currency_tickers[cid] = ticker
+        if not currencies_data or 'currencies' not in currencies_data:
+            raise ValueError("Не удалось загрузить список валют")
+
+        # Обрабатываем валюты
+        for currency in currencies_data['currencies']:
+            cid = currency['id']
+            self.currencies[cid] = currency
+
+            # Извлекаем тикер
+            ticker = self._extract_ticker(currency, bybit_tickers)
+            if ticker:
+                self.currency_tickers[cid] = ticker
+                self.ticker_to_id[ticker] = cid
 
         print(f"[BestChange] ✓ Валют загружено: {len(self.currencies)}")
         print(f"[BestChange] ✓ Распознано криптовалют: {len(self.currency_tickers)}")
 
-        # Показываем примеры распознанных тикеров
+        # Показываем распознанные тикеры
         if self.currency_tickers:
-            sample = list(self.currency_tickers.values())[:20]
-            print(f"[BestChange] Примеры распознанных: {', '.join(sorted(set(sample)))}")
+            recognized = sorted(set(self.currency_tickers.values()))[:25]
+            print(f"[BestChange] Распознанные тикеры: {', '.join(recognized)}")
 
         # ═══════════════════════════════════════════════════════════
-        # ШАГ 2: Парсим обменники
+        # ШАГ 2: Загружаем список обменников
         # ═══════════════════════════════════════════════════════════
-        exchangers_text = sections[2]
-        for line in exchangers_text.strip().splitlines():
-            parts = line.split(";")
-            if len(parts) >= 2:
-                eid = int(parts[0])
-                name = parts[1].strip()
-                self.exchangers[eid] = name
+        print("[BestChange] Загрузка обменников...")
+        changers_data = self._make_request(f"changers/{self.lang}")
 
-        print(f"[BestChange] ✓ Обменников: {len(self.exchangers)}")
+        if changers_data and 'changers' in changers_data:
+            for changer in changers_data['changers']:
+                if changer.get('active', False):  # Только активные
+                    self.changers[changer['id']] = changer['name']
 
-        # ═══════════════════════════════════════════════════════════
-        # ШАГ 3: Парсим курсы обмена
-        # ═══════════════════════════════════════════════════════════
-        rates_text = sections[3]
-        crypto_rates = 0
+            print(f"[BestChange] ✓ Активных обменников: {len(self.changers)}")
 
-        for line in rates_text.strip().splitlines():
-            parts = line.split(";")
-            if len(parts) >= 6:
-                try:
-                    from_id = int(parts[0])
-                    to_id = int(parts[1])
-
-                    # Проверяем что обе валюты распознаны как крипто
-                    if from_id not in self.currency_tickers or to_id not in self.currency_tickers:
-                        continue
-
-                    rate = float(parts[2]) if parts[2] else 0.0
-                    if rate <= 0:
-                        continue
-
-                    rate_data = {
-                        "from_id": from_id,
-                        "to_id": to_id,
-                        "from_ticker": self.currency_tickers[from_id],
-                        "to_ticker": self.currency_tickers[to_id],
-                        "rate": rate,
-                        "give": float(parts[3]) if parts[3] else 0.0,
-                        "exchanger_id": int(parts[4]),
-                        "reserve": float(parts[5]) if parts[5] else 0.0,
-                    }
-
-                    self.rates.append(rate_data)
-                    crypto_rates += 1
-
-                except (ValueError, IndexError):
-                    continue
-
-        print(f"[BestChange] ✓ Крипто-крипто курсов: {crypto_rates}")
-
-    def _extract_ticker(self, currency_name: str, bybit_tickers: Set[str] = None) -> str:
+    def _extract_ticker(self, currency: Dict, bybit_tickers: Set[str] = None) -> str:
         """
-        Извлекает тикер криптовалюты из названия BestChange.
+        Извлекает тикер из данных валюты BestChange
 
-        Примеры названий в BestChange:
-        - "Bitcoin BTC"
-        - "Tether TRC20 USDT"
-        - "Ethereum ETH"
-        - "BNB Smart Chain BNB BEP20"
-
-        Стратегия:
-        1. Если передан список тикеров Bybit - ищем точное совпадение
-        2. Ищем известные паттерны в конце строки
-        3. Ищем известные криптовалюты в любом месте
+        Поля валюты:
+        - code: короткий код (например "BTC", "ETHBEP20")
+        - viewname: отображаемое имя (например "BTC", "ETH BEP20")
+        - name: полное имя (например "Bitcoin", "Ethereum BEP20")
+        - crypto: True если криптовалюта
         """
-        name_upper = currency_name.upper()
+        # Только криптовалюты
+        if not currency.get('crypto', False):
+            return ""
 
-        # Если есть список тикеров Bybit - приоритет точному совпаденю
+        name = currency.get('name', '').upper()
+        code = currency.get('code', '').upper()
+        viewname = currency.get('viewname', '').upper()
+
+        # Приоритет 1: Точное совпадение с Bybit тикерами
         if bybit_tickers:
+            # Проверяем code
+            if code in bybit_tickers:
+                return code
+
+            # Извлекаем базовый тикер из code (например ETHBEP20 -> ETH)
             for ticker in bybit_tickers:
-                # Ищем ticker как отдельное слово (не часть другого слова)
-                if f" {ticker} " in f" {name_upper} " or name_upper.endswith(f" {ticker}"):
+                if code.startswith(ticker) and len(ticker) >= 3:
                     return ticker
 
-        # Известные паттерны в конце названия
-        # Пример: "Bitcoin BTC" -> BTC
-        words = name_upper.split()
-        if len(words) >= 2:
-            last_word = words[-1]
-            # Проверяем что последнее слово похоже на тикер (2-5 символов, заглавные)
-            if 2 <= len(last_word) <= 5 and last_word.isalpha():
-                if bybit_tickers is None or last_word in bybit_tickers:
-                    return last_word
+            # Ищем в viewname
+            for ticker in bybit_tickers:
+                if ticker in viewname.split():
+                    return ticker
 
-        # Список всех известных криптовалют (расширенный)
+        # Приоритет 2: Известные криптовалюты
         known_cryptos = {
-            # Топ по капитализации
-            'BTC', 'ETH', 'USDT', 'BNB', 'XRP', 'USDC', 'ADA', 'DOGE', 'SOL', 'TRX',
-            'DOT', 'MATIC', 'LTC', 'SHIB', 'AVAX', 'DAI', 'LINK', 'BCH', 'XLM', 'UNI',
-            'ATOM', 'XMR', 'ETC', 'ICP', 'FIL', 'APT', 'VET', 'ALGO', 'HBAR', 'QNT',
-            'NEAR', 'GRT', 'AAVE', 'MKR', 'SAND', 'MANA', 'AXS', 'EGLD', 'THETA', 'FTM',
-            'RUNE', 'ZEC', 'DASH', 'XTZ', 'EOS', 'NEO', 'IOTA', 'BSV', 'WAVES', 'KSM',
-            # Популярные альткоины
-            'ARB', 'OP', 'TON', 'PEPE', 'INJ', 'TIA', 'SEI', 'SUI', 'ORDI', 'STX',
-            'IMX', 'RNDR', 'FTM', 'BONK', 'WIF', 'PYTH', 'JUP', 'DYM', 'STRK',
-            # Стейблкоины
-            'TUSD', 'BUSD', 'USDD', 'FRAX', 'USDP',
-            # DeFi
-            'CRV', 'SNX', 'COMP', 'YFI', '1INCH', 'SUSHI', 'BAL', 'LDO',
-            # Layer 2
-            'MATIC', 'IMX', 'LRC', 'METIS',
-            # Мемкоины
-            'DOGE', 'SHIB', 'PEPE', 'FLOKI', 'BONK',
+            'BTC', 'ETH', 'USDT', 'USDC', 'BNB', 'XRP', 'ADA', 'SOL', 'DOGE',
+            'DOT', 'MATIC', 'LTC', 'SHIB', 'AVAX', 'TRX', 'LINK', 'BCH', 'XLM',
+            'UNI', 'ATOM', 'XMR', 'ETC', 'FIL', 'APT', 'NEAR', 'ARB', 'OP',
+            'TON', 'DAI', 'BUSD', 'TUSD', 'XTZ', 'ALGO', 'VET', 'ICP', 'HBAR',
+            'QNT', 'GRT', 'AAVE', 'MKR', 'SAND', 'MANA', 'AXS', 'THETA', 'FTM'
         }
 
-        # Ищем в любом месте строки
+        # Проверяем code на известные тикеры
         for crypto in known_cryptos:
-            if crypto in name_upper:
-                # Дополнительная проверка для коротких тикеров (2-3 символа)
-                if len(crypto) <= 3:
-                    # Проверяем что это отдельное слово
-                    if f" {crypto} " in f" {name_upper} " or name_upper.startswith(crypto + " ") or name_upper.endswith(
-                            " " + crypto):
-                        return crypto
-                else:
-                    return crypto
+            if code == crypto or code.startswith(crypto):
+                return crypto
+
+        # Проверяем viewname
+        viewname_parts = viewname.split()
+        for part in viewname_parts:
+            if part in known_cryptos:
+                return part
+
+        # Приоритет 3: Первое слово из viewname (если короткое)
+        if viewname_parts and 2 <= len(viewname_parts[0]) <= 5:
+            first_word = viewname_parts[0]
+            if first_word.isalpha():
+                return first_word
 
         return ""
 
     def get_crypto_to_crypto_pairs(self) -> Dict[str, Dict[str, List[Dict]]]:
         """
-        Возвращает словарь криптовалютных пар.
+        Возвращает словарь криптовалютных пар с курсами обмена
 
         Структура:
         {
@@ -212,70 +167,148 @@ class BestChangeHandler:
                         'exchanger_id': 123,
                         'reserve': 100.5,
                         'give': 0.01,
+                        'receive': 15.5
                     },
                     ...
-                ],
-                'USDT': [...]
+                ]
             }
         }
         """
+        print("\n[BestChange] Загрузка курсов обмена...")
+
         crypto_pairs = {}
+        total_requests = 0
+        total_rates = 0
 
-        for rate in self.rates:
-            from_ticker = rate['from_ticker']
-            to_ticker = rate['to_ticker']
+        # Получаем все распознанные криптовалюты
+        crypto_ids = list(self.currency_tickers.keys())
 
-            # Пропускаем обмены валюты на саму себя
-            if from_ticker == to_ticker:
+        print(f"[BestChange] Проверка направлений для {len(crypto_ids)} криптовалют...")
+
+        # Для каждой криптовалюты проверяем доступные направления
+        for from_id in crypto_ids:
+            from_ticker = self.currency_tickers[from_id]
+
+            # Получаем доступные направления (пары) для этой валюты
+            presences = self._make_request(f"presences/{from_id}-0")
+
+            if not presences or 'presences' not in presences:
                 continue
 
-            # Создаём структуру
-            if from_ticker not in crypto_pairs:
-                crypto_pairs[from_ticker] = {}
+            total_requests += 1
 
-            if to_ticker not in crypto_pairs[from_ticker]:
-                crypto_pairs[from_ticker][to_ticker] = []
+            # Собираем пары для пакетного запроса (до 500 пар)
+            pair_list = []
+            valid_targets = {}  # to_id -> to_ticker
 
-            # Получаем название обменника
-            exchanger_name = self.exchangers.get(
-                rate['exchanger_id'],
-                f"Exchanger #{rate['exchanger_id']}"
-            )
+            for presence in presences['presences']:
+                pair_str = presence['pair']
+                parts = pair_str.split('-')
 
-            # Добавляем предложение
-            crypto_pairs[from_ticker][to_ticker].append({
-                'rate': rate['rate'],
-                'exchanger': exchanger_name,
-                'exchanger_id': rate['exchanger_id'],
-                'reserve': rate['reserve'],
-                'give': rate['give'],
-            })
+                if len(parts) >= 2:
+                    to_id = int(parts[1])
+
+                    # Проверяем что целевая валюта тоже криптовалюта
+                    if to_id in self.currency_tickers:
+                        to_ticker = self.currency_tickers[to_id]
+
+                        # Не меняем валюту на саму себя
+                        if from_ticker != to_ticker:
+                            pair_list.append(pair_str)
+                            valid_targets[to_id] = to_ticker
+
+            if not pair_list:
+                continue
+
+            # Делаем пакетный запрос курсов (максимум 500 пар)
+            batch_size = 500
+            for i in range(0, len(pair_list), batch_size):
+                batch = pair_list[i:i + batch_size]
+                pair_string = '+'.join(batch)
+
+                rates_data = self._make_request(f"rates/{pair_string}")
+
+                if not rates_data or 'rates' not in rates_data:
+                    continue
+
+                total_requests += 1
+
+                # Обрабатываем полученные курсы
+                for pair_id, rates_list in rates_data['rates'].items():
+                    parts = pair_id.split('-')
+                    if len(parts) < 2:
+                        continue
+
+                    to_id = int(parts[1])
+                    to_ticker = valid_targets.get(to_id)
+
+                    if not to_ticker:
+                        continue
+
+                    # Создаём структуру
+                    if from_ticker not in crypto_pairs:
+                        crypto_pairs[from_ticker] = {}
+
+                    if to_ticker not in crypto_pairs[from_ticker]:
+                        crypto_pairs[from_ticker][to_ticker] = []
+
+                    # Добавляем предложения от обменников
+                    for rate_data in rates_list:
+                        exchanger_id = rate_data['changer']
+                        exchanger_name = self.changers.get(
+                            exchanger_id,
+                            f"Exchanger #{exchanger_id}"
+                        )
+
+                        try:
+                            offer = {
+                                'rate': float(rate_data['rate']),
+                                'exchanger': exchanger_name,
+                                'exchanger_id': exchanger_id,
+                                'reserve': float(rate_data.get('reserve', 0)),
+                                'give': float(rate_data.get('inmin', 0)),
+                                'receive': 0  # Рассчитается при использовании
+                            }
+
+                            # Пропускаем нулевые или отрицательные курсы
+                            if offer['rate'] <= 0:
+                                continue
+
+                            crypto_pairs[from_ticker][to_ticker].append(offer)
+                            total_rates += 1
+
+                        except (ValueError, TypeError):
+                            continue
+
+            # Показываем прогресс
+            if total_requests % 10 == 0:
+                print(f"[BestChange] Обработано {total_requests} запросов, найдено {total_rates} курсов...")
 
         # Сортируем предложения по курсу (лучший первым)
-        for from_crypto in crypto_pairs:
-            for to_crypto in crypto_pairs[from_crypto]:
-                crypto_pairs[from_crypto][to_crypto].sort(
+        for from_ticker in crypto_pairs:
+            for to_ticker in crypto_pairs[from_ticker]:
+                crypto_pairs[from_ticker][to_ticker].sort(
                     key=lambda x: x['rate'],
                     reverse=True
                 )
 
+        # Статистика
         total_directions = sum(len(v) for v in crypto_pairs.values())
-        total_offers = sum(
-            sum(len(offers) for offers in directions.values())
-            for directions in crypto_pairs.values()
-        )
 
-        print(f"[BestChange] ✓ Уникальных пар: {total_directions}")
-        print(f"[BestChange] ✓ Всего предложений: {total_offers}")
+        print(f"\n[BestChange] ✓ API запросов: {total_requests}")
+        print(f"[BestChange] ✓ Уникальных направлений: {total_directions}")
+        print(f"[BestChange] ✓ Всего предложений: {total_rates}")
 
         # Показываем примеры
         if crypto_pairs:
             sample_pairs = []
-            for from_crypto in list(crypto_pairs.keys())[:5]:
-                for to_crypto in list(crypto_pairs[from_crypto].keys())[:2]:
-                    sample_pairs.append(f"{from_crypto}→{to_crypto}")
+            for from_ticker in list(crypto_pairs.keys())[:5]:
+                for to_ticker in list(crypto_pairs[from_ticker].keys())[:3]:
+                    count = len(crypto_pairs[from_ticker][to_ticker])
+                    sample_pairs.append(f"{from_ticker}→{to_ticker}({count})")
+
             if sample_pairs:
-                print(f"[BestChange] Примеры пар: {', '.join(sample_pairs)}")
+                print(f"[BestChange] Примеры: {', '.join(sample_pairs)}")
 
         return crypto_pairs
 
@@ -285,5 +318,5 @@ class BestChangeHandler:
             self.load_data(bybit_tickers)
             return True
         except Exception as e:
-            print(f"[BestChange] ✗ Ошибка обновления данных: {e}")
+            print(f"[BestChange] ✗ Ошибка обновления: {e}")
             return False
