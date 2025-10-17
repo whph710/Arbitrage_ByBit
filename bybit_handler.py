@@ -1,5 +1,5 @@
 import aiohttp
-from typing import Dict
+from typing import Dict, Set
 from configs import BYBIT_API_URL, REQUEST_TIMEOUT
 
 
@@ -14,6 +14,8 @@ class BybitClientAsync:
         }
         self.timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         self.session = None
+        self.usdt_pairs: Dict[str, float] = {}
+        self.coins: Set[str] = set()
 
     async def __aenter__(self):
         await self.create_session()
@@ -31,8 +33,8 @@ class BybitClientAsync:
             await self.session.close()
             self.session = None
 
-    async def get_usdt_tickers(self) -> Dict[str, float]:
-        """Получает все USDT-пары с Bybit"""
+    async def load_usdt_pairs(self):
+        """Загружает все USDT-пары с Bybit и сохраняет в usdt_pairs и coins"""
         if self.session is None:
             await self.create_session()
 
@@ -43,7 +45,9 @@ class BybitClientAsync:
                 response.raise_for_status()
                 data = await response.json()
 
-            tickers = {}
+            self.usdt_pairs.clear()
+            self.coins.clear()
+
             result_list = data.get('result', {}).get('list', [])
 
             for ticker in result_list:
@@ -54,12 +58,16 @@ class BybitClientAsync:
                 try:
                     price = float(ticker.get('lastPrice', 0))
                     if price > 0:
-                        tickers[base] = price
+                        self.usdt_pairs[base] = price
+                        self.coins.add(base)
                 except (ValueError, TypeError):
                     continue
 
-            return tickers
-
         except Exception as e:
-            print(f"[Bybit] Ошибка: {e}")
-            return {}
+            print(f"[Bybit] Ошибка при загрузке пар: {e}")
+
+    async def get_usdt_tickers(self) -> Dict[str, float]:
+        """Получает все USDT-пары с Bybit (для совместимости со старым кодом)"""
+        if not self.usdt_pairs:
+            await self.load_usdt_pairs()
+        return self.usdt_pairs

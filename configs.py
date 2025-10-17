@@ -22,13 +22,14 @@ MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 10))  # па�
 # ───────────────────────────────
 # Bybit API
 # ───────────────────────────────
-BYBIT_API_URL = os.getenv("BYBIT_API_URL", "https://api.bybit.com/v5/market/tickers")
+BYBIT_API_URL = os.getenv("BYBIT_API_URL", "https://api.bybit.com")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
 # ───────────────────────────────
 # BestChange API
 # ───────────────────────────────
+BESTCHANGE_API_KEY = os.getenv("BESTCHANGE_API_KEY", "")
 BESTCHANGE_BASE_URL = os.getenv("BESTCHANGE_BASE_URL", "https://bestchange.app")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 30))  # таймаут для HTTP запросов
 
@@ -52,6 +53,7 @@ if DEBUG:
     print(f"SHOW_TOP = {SHOW_TOP}")
     print(f"MAX_CONCURRENT_REQUESTS = {MAX_CONCURRENT_REQUESTS}")
     print(f"BYBIT_API_URL = {BYBIT_API_URL}")
+    print(f"BESTCHANGE_API_KEY = {'***' if BESTCHANGE_API_KEY else 'NOT SET'}")
     print(f"BESTCHANGE_BASE_URL = {BESTCHANGE_BASE_URL}")
     print(f"RESULTS_DIR = {RESULTS_DIR}")
     print(f"LOGS_DIR = {LOGS_DIR}")
