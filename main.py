@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime
 from configs import START_AMOUNT, MIN_SPREAD, SHOW_TOP
 from bybit_handler import BybitClientAsync
-from binance_handler import BinanceClientAsync
+from logs.binance_handler import BinanceClientAsync
 from arbitrage_analyzer import ArbitrageAnalyzerAsync
 from results_saver import ResultsSaver
 
@@ -40,7 +40,7 @@ async def main():
         print(f"\n[Bybit] ✓ Загружено {len(bybit.usdt_pairs)} пар")
         print(f"[Binance] ✓ Загружено {len(binance.usdt_pairs)} пар")
 
-        # Общие монеты
+        # Общие монеты - ДИАГНОСТИКА
         common_coins = bybit.coins & binance.coins
         print(f"\n✅ Общих монет на обеих биржах: {len(common_coins)}")
 
@@ -48,6 +48,15 @@ async def main():
             preview = ', '.join(sorted(list(common_coins)[:20]))
             more = f" и еще {len(common_coins) - 20}" if len(common_coins) > 20 else ""
             print(f"   Примеры: {preview}{more}")
+        else:
+            print(f"\n❌ КРИТИЧЕСКАЯ ПРОБЛЕМА: Нет общих монет!")
+            print(f"   Bybit монеты (первые 20): {', '.join(sorted(list(bybit.coins))[:20])}")
+            print(f"   Binance монеты (первые 20): {', '.join(sorted(list(binance.coins))[:20])}")
+            print(f"\n💡 Проверьте:")
+            print(f"   1. Доступность API бирж")
+            print(f"   2. Правильность парсинга символов")
+            print(f"   3. Фильтры монет в configs.py")
+            return
 
         # ───────────────────────────────────────────────────────────────
         # ШАГ 2: Анализ арбитража с выводом в реальном времени
@@ -177,5 +186,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Критическая ошибка: {e}")
         import traceback
-
         traceback.print_exc()

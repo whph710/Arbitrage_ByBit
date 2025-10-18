@@ -78,6 +78,19 @@ class ArbitrageAnalyzerAsync:
         # Возвращаем все найденные возможности
         return opportunities
 
+    def _coin_available_on_both_exchanges(self, coin: str) -> bool:
+        """
+        КРИТИЧЕСКАЯ ПРОВЕРКА: Монета должна реально торговаться с USDT на ОБЕИХ биржах
+
+        Проверяет что:
+        1. На Bybit есть пара COIN/USDT с ценой
+        2. На Binance есть пара COIN/USDT с ценой
+        """
+        bybit_has = coin in self.bybit.usdt_pairs and self.bybit.usdt_pairs[coin] > 0
+        binance_has = coin in self.binance.usdt_pairs and self.binance.usdt_pairs[coin] > 0
+
+        return bybit_has and binance_has
+
     async def _find_direct_arbitrage(
             self,
             start_amount: float,
@@ -89,7 +102,7 @@ class ArbitrageAnalyzerAsync:
         - Bybit → Binance
         - Binance → Bybit
 
-        ВАЖНО: Проверяет что монета реально доступна на ОБЕИХ биржах!
+        КРИТИЧНО: Проверяет что монета реально доступна на ОБЕИХ биржах!
         """
         local_opps = []
 
@@ -99,19 +112,35 @@ class ArbitrageAnalyzerAsync:
         if not bybit_prices or not binance_prices:
             return local_opps
 
-        # КРИТИЧНО: Используем только монеты, которые есть НА ОБЕИХ биржах
+        # КРИТИЧНО: Используем только монеты с реальными USDT-парами на ОБЕИХ биржах
         common_coins = set(bybit_prices.keys()) & set(binance_prices.keys())
 
-        print(f"[Direct] Проверка {len(common_coins)} общих монет...")
+        print(f"[Direct] Монет с USDT-парами на Bybit: {len(bybit_prices)}")
+        print(f"[Direct] Монет с USDT-парами на Binance: {len(binance_prices)}")
+        print(f"[Direct] Общих монет (пересечение): {len(common_coins)}")
 
+        if len(common_coins) == 0:
+            print(f"[Direct] ❌ КРИТИЧЕСКАЯ ОШИБКА: Нет общих монет с USDT-парами!")
+            print(f"[Direct] Bybit примеры: {list(bybit_prices.keys())[:10]}")
+            print(f"[Direct] Binance примеры: {list(binance_prices.keys())[:10]}")
+            return local_opps
+
+        # Дополнительная проверка: монета должна быть реально торгуемой
+        verified_coins = []
         for coin in common_coins:
-            try:
-                # Двойная проверка что цены существуют
-                bybit_price = bybit_prices.get(coin)
-                binance_price = binance_prices.get(coin)
+            if self._coin_available_on_both_exchanges(coin):
+                verified_coins.append(coin)
 
-                if not bybit_price or not binance_price:
-                    continue
+        print(f"[Direct] ✓ Проверенных монет (реально доступных на обеих биржах): {len(verified_coins)}")
+
+        if len(verified_coins) == 0:
+            print(f"[Direct] ❌ После проверки не осталось доступных монет!")
+            return local_opps
+
+        for coin in verified_coins:
+            try:
+                bybit_price = bybit_prices[coin]
+                binance_price = binance_prices[coin]
 
                 if bybit_price <= 0 or binance_price <= 0:
                     continue
@@ -290,25 +319,54 @@ class ArbitrageAnalyzerAsync:
         Треугольный кросс-биржевой арбитраж:
         Exchange1: USDT → CoinA
         Exchange2: CoinA → CoinB → USDT
+
+        КРИТИЧНО:
+        - CoinA должна иметь USDT-пару на ОБЕИХ биржах (для возможности перевода)
+        - CoinB должна иметь USDT-пару на Exchange2
+        - Пара CoinA/CoinB должна существовать на Exchange2
         """
         local_opps = []
 
         prices_1 = client_1.usdt_pairs
         prices_2 = client_2.usdt_pairs
 
-        # КРИТИЧНО: Только монеты доступные на ОБЕИХ биржах
-        common_coins = set(prices_1.keys()) & set(prices_2.keys())
+        # КРИТИЧНО: CoinA должна иметь USDT-пару на ОБЕИХ биржах
+        common_coins_a = set(prices_1.keys()) & set(prices_2.keys())
 
-        print(f"[Cross {exchange_1}→{exchange_2}] Проверка кросс-биржевых связок...")
+        # CoinB должна иметь USDT-пару на второй бирже
+        available_coins_b = set(prices_2.keys())
 
-        for coin_a in common_coins:
-            for coin_b in prices_2.keys():
+        print(f"[Cross {exchange_1}→{exchange_2}] Монет с USDT на {exchange_1}: {len(prices_1)}")
+        print(f"[Cross {exchange_1}→{exchange_2}] Монет с USDT на {exchange_2}: {len(prices_2)}")
+        print(f"[Cross {exchange_1}→{exchange_2}] Общих монет (для перевода): {len(common_coins_a)}")
+
+        if len(common_coins_a) == 0:
+            print(f"[Cross {exchange_1}→{exchange_2}] ❌ Нет общих монет с USDT-парами для перевода!")
+            return local_opps
+
+        # Дополнительная проверка доступности
+        verified_coins_a = []
+        for coin in common_coins_a:
+            if self._coin_available_on_both_exchanges(coin):
+                verified_coins_a.append(coin)
+
+        print(f"[Cross {exchange_1}→{exchange_2}] ✓ Проверенных монет для перевода: {len(verified_coins_a)}")
+
+        if len(verified_coins_a) == 0:
+            print(f"[Cross {exchange_1}→{exchange_2}] ❌ После проверки не осталось монет для перевода!")
+            return local_opps
+
+        checked = 0
+        for coin_a in verified_coins_a:
+            for coin_b in available_coins_b:
                 if coin_a == coin_b:
                     continue
 
                 # Проверяем наличие пары CoinA/CoinB на второй бирже
                 if not client_2.has_trading_pair(coin_a, coin_b):
                     continue
+
+                checked += 1
 
                 try:
                     price_a_exch1 = prices_1[coin_a]
@@ -353,6 +411,7 @@ class ArbitrageAnalyzerAsync:
                 except Exception:
                     continue
 
+        print(f"[Cross {exchange_1}→{exchange_2}] Проверено пар: {checked}")
         return local_opps
 
     def _print_found_opportunity(self, opp: Dict):

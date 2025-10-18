@@ -14,9 +14,9 @@ class BinanceClientAsync:
         }
         self.timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         self.session = None
-        self.usdt_pairs: Dict[str, float] = {}
-        self.coins: Set[str] = set()
-        self.trading_pairs: Set[tuple] = set()  # Реальные торговые пары (base, quote)
+        self.usdt_pairs: Dict[str, float] = {}  # Только реальные USDT-пары
+        self.coins: Set[str] = set()  # Только монеты с USDT-парами
+        self.trading_pairs: Set[tuple] = set()  # Все торговые пары (base, quote)
 
     async def __aenter__(self):
         await self.create_session()
@@ -54,7 +54,14 @@ class BinanceClientAsync:
         return coin not in BLACKLIST_COINS
 
     async def load_usdt_pairs(self):
-        """Загружает все USDT-пары с Binance и сохраняет в usdt_pairs и coins"""
+        """
+        Загружает все USDT-пары с Binance
+
+        ВАЖНО:
+        - usdt_pairs содержит ТОЛЬКО монеты с реальными USDT-парами
+        - coins содержит ТОЛЬКО монеты из usdt_pairs
+        - trading_pairs содержит ВСЕ торговые пары для треугольного арбитража
+        """
         if self.session is None:
             await self.create_session()
 
@@ -66,13 +73,13 @@ class BinanceClientAsync:
 
             self.usdt_pairs.clear()
             self.coins.clear()
-            self.trading_pairs.clear()  # Очищаем торговые пары
+            self.trading_pairs.clear()
             filtered_count = 0
 
             for ticker in data:
                 symbol = ticker.get('symbol', '').upper()
 
-                # Обрабатываем USDT пары
+                # Обрабатываем ТОЛЬКО USDT пары
                 if symbol.endswith('USDT'):
                     base = symbol[:-4]  # Убираем 'USDT' из конца
 
@@ -85,24 +92,28 @@ class BinanceClientAsync:
                         price = float(ticker.get('price', 0))
                         if price > 0:
                             self.usdt_pairs[base] = price
+                            # ВАЖНО: Добавляем в coins ТОЛЬКО если есть USDT-пара!
                             self.coins.add(base)
                             self.trading_pairs.add(('USDT', base))  # USDT -> BASE
                     except (ValueError, TypeError):
                         continue
 
                 # Сохраняем все остальные торговые пары для треугольного арбитража
+                # НО НЕ ДОБАВЛЯЕМ их базовые монеты в self.coins!
                 else:
                     # Пытаемся определить базу и квоту
-                    # Проверяем распространенные квоты: BTC, ETH, BNB, USDT
+                    # Проверяем распространенные квоты: BTC, ETH, BNB, BUSD
                     for quote in ['BTC', 'ETH', 'BNB', 'USDT', 'BUSD']:
                         if symbol.endswith(quote) and len(symbol) > len(quote):
                             base = symbol[:-len(quote)]
+                            # Сохраняем пару для треугольного арбитража
                             if self._should_include_coin(base) and self._should_include_coin(quote):
                                 self.trading_pairs.add((quote, base))  # QUOTE -> BASE
                             break
 
-            print(f"[Binance] ✓ Загружено {len(self.usdt_pairs)} торговых пар USDT")
-            print(f"[Binance] ✓ Найдено {len(self.trading_pairs)} всех торговых пар")
+            print(f"[Binance] ✓ Загружено {len(self.usdt_pairs)} USDT-пар")
+            print(f"[Binance] ✓ Монет с USDT-парами: {len(self.coins)}")
+            print(f"[Binance] ✓ Всего торговых пар: {len(self.trading_pairs)}")
             if filtered_count > 0:
                 print(f"[Binance] 🔍 Отфильтровано монет: {filtered_count}")
 
