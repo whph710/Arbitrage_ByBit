@@ -19,21 +19,21 @@ SHOW_TOP = int(os.getenv("SHOW_TOP", 10))
 MAX_REASONABLE_SPREAD = 10.0  # 10% - максимальный реалистичный спред
 
 # ============================================================================
-# ФИЛЬТРАЦИЯ МОНЕТ - ОТКЛЮЧЕНА для работы с обменниками
+# ФИЛЬТРАЦИЯ МОНЕТ
 # ============================================================================
 BLACKLIST_COINS = set()
 WHITELIST_COINS = set()
 ENABLE_COIN_FILTER = False  # Отключаем фильтрацию - берём ВСЕ монеты
 
 # ============================================================================
-# НАСТРОЙКИ API ЗАПРОСОВ (МАКСИМАЛЬНО ОПТИМИЗИРОВАННЫЕ)
+# НАСТРОЙКИ API ЗАПРОСОВ
 # ============================================================================
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 20))  # Увеличено для параллелизма
-REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", 0.1))  # Минимальная задержка
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 20))
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", 0.1))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", 100))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", 1))  # Только 1 повтор для скорости
-RETRY_DELAY = float(os.getenv("RETRY_DELAY", 0.5))  # Быстрые повторы
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 15))  # Короткий таймаут
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 1))
+RETRY_DELAY = float(os.getenv("RETRY_DELAY", 0.5))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 15))
 
 # ============================================================================
 # BYBIT API SETTINGS
@@ -43,36 +43,30 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
 # ============================================================================
+# BINANCE API SETTINGS
+# ============================================================================
+BINANCE_API_URL = os.getenv("BINANCE_API_URL", "https://api.binance.com")
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+
+# ============================================================================
 # CHANGENOW API SETTINGS
 # ============================================================================
-CHANGENOW_API_KEY = os.getenv("CHANGENOW_API_KEY", "")  # Опционально
+CHANGENOW_API_KEY = os.getenv("CHANGENOW_API_KEY", "")
 
 # ============================================================================
 # SWAPZONE API SETTINGS
 # ============================================================================
-SWAPZONE_API_KEY = os.getenv("SWAPZONE_API_KEY", "XQZenodya")  # Ваш API ключ
+SWAPZONE_API_KEY = os.getenv("SWAPZONE_API_KEY", "XQZenodya")
 
 # ============================================================================
-# НАСТРОЙКИ АНАЛИЗА ОБМЕННИКОВ (МАКСИМАЛЬНО ОПТИМИЗИРОВАННЫЕ)
+# НАСТРОЙКИ АНАЛИЗА ОБМЕННИКОВ
 # ============================================================================
-# Максимальное количество пар для проверки
-# Рекомендуется: 100-200 для быстрого анализа (1-3 мин), 300-1000 для полного (5-15 мин)
 MAX_PAIRS_TO_CHECK = int(os.getenv("MAX_PAIRS_TO_CHECK", 150))
-
-# Задержка между запросами к обменнику (секунды)
-# 0 = максимальная скорость (риск rate limit), 0.05-0.1 = оптимально
 EXCHANGE_REQUEST_DELAY = float(os.getenv("EXCHANGE_REQUEST_DELAY", 0.0))
-
-# Минимальная сумма для обмена (USDT)
 MIN_EXCHANGE_AMOUNT = float(os.getenv("MIN_EXCHANGE_AMOUNT", 10.0))
-
-# Максимальная сумма для обмена (USDT)
 MAX_EXCHANGE_AMOUNT = float(os.getenv("MAX_EXCHANGE_AMOUNT", 10000.0))
-
-# Кэширование неудачных пар (не запрашивать повторно)
 CACHE_FAILED_PAIRS = True
-
-# Количество параллельных запросов к обменнику (10-50 оптимально)
 PARALLEL_EXCHANGE_REQUESTS = int(os.getenv("PARALLEL_EXCHANGE_REQUESTS", 20))
 
 # ============================================================================
@@ -102,6 +96,7 @@ if DEBUG:
     print(f"REQUEST_TIMEOUT = {REQUEST_TIMEOUT}")
     print(f"CACHE_FAILED_PAIRS = {CACHE_FAILED_PAIRS}")
     print(f"BYBIT_API_URL = {BYBIT_API_URL}")
+    print(f"BINANCE_API_URL = {BINANCE_API_URL}")
     print(f"CHANGENOW_API_KEY = {'задан' if CHANGENOW_API_KEY else 'не задан'}")
     print(f"RESULTS_DIR = {RESULTS_DIR}")
     print(f"LOGS_DIR = {LOGS_DIR}")
