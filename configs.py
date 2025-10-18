@@ -36,10 +36,23 @@ RETRY_DELAY = float(os.getenv("RETRY_DELAY", 2.0))
 # Таймаут для запросов (увеличен с 15 до 30 секунд)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 30))
 
+# ============================================================================
+# BYBIT API SETTINGS
+# ============================================================================
 BYBIT_API_URL = os.getenv("BYBIT_API_URL", "https://api.bybit.com")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
+# ============================================================================
+# BINANCE API SETTINGS
+# ============================================================================
+BINANCE_API_URL = os.getenv("BINANCE_API_URL", "https://api.binance.com")
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+
+# ============================================================================
+# BESTCHANGE API SETTINGS
+# ============================================================================
 BESTCHANGE_API_KEY = os.getenv("BESTCHANGE_API_KEY", "")
 BESTCHANGE_BASE_URL = os.getenv("BESTCHANGE_BASE_URL", "https://bestchange.app")
 
@@ -62,6 +75,7 @@ if DEBUG:
     print(f"RETRY_DELAY = {RETRY_DELAY}")
     print(f"REQUEST_TIMEOUT = {REQUEST_TIMEOUT}")
     print(f"BYBIT_API_URL = {BYBIT_API_URL}")
+    print(f"BINANCE_API_URL = {BINANCE_API_URL}")
     print(f"BESTCHANGE_API_KEY = {'***' if BESTCHANGE_API_KEY else 'NOT SET'}")
     print(f"BESTCHANGE_BASE_URL = {BESTCHANGE_BASE_URL}")
     print(f"RESULTS_DIR = {RESULTS_DIR}")
