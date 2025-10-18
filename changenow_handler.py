@@ -5,11 +5,11 @@ from configs import REQUEST_TIMEOUT, MAX_RETRIES, RETRY_DELAY
 
 
 class ChangeNowClientAsync:
-    """Асинхронный клиент для ChangeNOW API"""
+    """Асинхронный клиент для ChangeNOW API с улучшенной обработкой ошибок"""
 
     def __init__(self, api_key: str = None):
         self.base_url = "https://api.changenow.io/v2"
-        self.api_key = api_key  # Опционально, для повышенных лимитов
+        self.api_key = api_key
         self.headers = {
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/4.0)'
@@ -22,7 +22,8 @@ class ChangeNowClientAsync:
 
         # Кэш доступных валют и пар
         self.available_currencies: Dict[str, Dict] = {}
-        self.exchange_ranges: Dict[str, Dict] = {}  # Минимальные/максимальные суммы
+        self.exchange_ranges: Dict[str, Dict] = {}
+        self.failed_pairs: set = set()  # Кэш неудачных пар для избежания повторных запросов
 
     async def __aenter__(self):
         await self.create_session()
@@ -58,6 +59,12 @@ class ChangeNowClientAsync:
                         await asyncio.sleep(wait_time)
                         continue
 
+                    if response.status == 400:
+                        # Ошибка 400 - неверные параметры, не повторяем запрос
+                        error_text = await response.text()
+                        # Не выводим каждую ошибку, только суммируем
+                        return None
+
                     response.raise_for_status()
                     return await response.json()
 
@@ -65,21 +72,24 @@ class ChangeNowClientAsync:
                 if e.status == 429 and attempt < retries:
                     await asyncio.sleep(RETRY_DELAY * (2 ** attempt))
                     continue
-                print(f"[ChangeNOW] ❌ Ошибка {e.status} для {endpoint}")
+                if e.status == 400:
+                    # Ошибка валидации - не повторяем
+                    return None
+                # Для других ошибок выводим сообщение
+                if attempt == retries:
+                    print(f"[ChangeNOW] ❌ Ошибка {e.status} для {endpoint}")
                 return None
 
             except asyncio.TimeoutError:
                 if attempt < retries:
                     await asyncio.sleep(RETRY_DELAY)
                     continue
-                print(f"[ChangeNOW] ⏱️ Таймаут для {endpoint}")
                 return None
 
             except Exception as e:
                 if attempt < retries:
                     await asyncio.sleep(RETRY_DELAY)
                     continue
-                print(f"[ChangeNOW] ❌ Ошибка: {e}")
                 return None
 
         return None
@@ -114,29 +124,39 @@ class ChangeNowClientAsync:
         """Получает минимальную и максимальную сумму обмена"""
         pair_key = f"{from_currency}_{to_currency}"
 
+        # Проверяем кэш неудачных пар
+        if pair_key in self.failed_pairs:
+            return None
+
+        # Проверяем кэш успешных пар
         if pair_key in self.exchange_ranges:
             return self.exchange_ranges[pair_key]
 
+        from_info = self.available_currencies.get(from_currency, {})
+        to_info = self.available_currencies.get(to_currency, {})
+
         data = await self._make_request(
-            f"exchange/range",
+            "exchange/range",
             params={
                 'fromCurrency': from_currency.lower(),
                 'toCurrency': to_currency.lower(),
-                'fromNetwork': self.available_currencies.get(from_currency, {}).get('network', ''),
-                'toNetwork': self.available_currencies.get(to_currency, {}).get('network', ''),
+                'fromNetwork': from_info.get('network', ''),
+                'toNetwork': to_info.get('network', ''),
                 'flow': 'standard'
             }
         )
 
-        if data:
+        if data and 'minAmount' in data:
             range_info = {
                 'min_amount': float(data.get('minAmount', 0)),
-                'max_amount': float(data.get('maxAmount', 0))
+                'max_amount': float(data.get('maxAmount', 0)) if data.get('maxAmount') else 999999999
             }
             self.exchange_ranges[pair_key] = range_info
             return range_info
-
-        return None
+        else:
+            # Добавляем в список неудачных пар
+            self.failed_pairs.add(pair_key)
+            return None
 
     async def get_estimated_amount(
             self,
@@ -149,17 +169,26 @@ class ChangeNowClientAsync:
 
         Returns:
             {
-                'to_amount': float,  # Сколько получим
-                'rate': float,       # Курс обмена
-                'from_amount': float # Исходная сумма
+                'to_amount': float,
+                'rate': float,
+                'from_amount': float
             }
         """
+        pair_key = f"{from_currency}_{to_currency}"
+
+        # Проверяем кэш неудачных пар
+        if pair_key in self.failed_pairs:
+            return None
+
+        from_info = self.available_currencies.get(from_currency, {})
+        to_info = self.available_currencies.get(to_currency, {})
+
         params = {
             'fromCurrency': from_currency.lower(),
             'toCurrency': to_currency.lower(),
             'fromAmount': from_amount,
-            'fromNetwork': self.available_currencies.get(from_currency, {}).get('network', ''),
-            'toNetwork': self.available_currencies.get(to_currency, {}).get('network', ''),
+            'fromNetwork': from_info.get('network', ''),
+            'toNetwork': to_info.get('network', ''),
             'flow': 'standard',
             'type': 'direct'
         }
@@ -167,21 +196,34 @@ class ChangeNowClientAsync:
         data = await self._make_request("exchange/estimated-amount", params=params)
 
         if data and 'toAmount' in data:
-            to_amount = float(data['toAmount'])
-            rate = to_amount / from_amount if from_amount > 0 else 0
+            try:
+                to_amount = float(data['toAmount'])
 
-            return {
-                'to_amount': to_amount,
-                'rate': rate,
-                'from_amount': from_amount,
-                'from_currency': from_currency,
-                'to_currency': to_currency
-            }
+                # НЕ рассчитываем rate здесь - это будет сделано в analyzer
+                # потому что API возвращает результат, а не курс конверсии
 
-        return None
+                return {
+                    'to_amount': to_amount,
+                    'from_amount': from_amount,
+                    'from_currency': from_currency,
+                    'to_currency': to_currency
+                }
+            except (ValueError, TypeError, ZeroDivisionError):
+                self.failed_pairs.add(pair_key)
+                return None
+        else:
+            # Добавляем в список неудачных пар
+            self.failed_pairs.add(pair_key)
+            return None
 
     async def check_pair_availability(self, from_currency: str, to_currency: str) -> bool:
         """Проверяет, доступна ли пара для обмена"""
+        pair_key = f"{from_currency}_{to_currency}"
+
+        # Быстрая проверка кэша неудачных пар
+        if pair_key in self.failed_pairs:
+            return False
+
         if from_currency not in self.available_currencies:
             return False
         if to_currency not in self.available_currencies:
@@ -193,7 +235,7 @@ class ChangeNowClientAsync:
 
     async def get_best_rate_batch(
             self,
-            pairs: List[tuple],  # [(from_currency, to_currency, amount), ...]
+            pairs: List[tuple],
             delay: float = 0.1
     ) -> Dict[str, Optional[Dict]]:
         """
@@ -206,6 +248,11 @@ class ChangeNowClientAsync:
 
         for from_curr, to_curr, amount in pairs:
             pair_key = f"{from_curr}_{to_curr}"
+
+            # Проверяем кэш неудачных пар
+            if pair_key in self.failed_pairs:
+                results[pair_key] = None
+                continue
 
             # Проверяем доступность пары
             if not await self.check_pair_availability(from_curr, to_curr):
@@ -237,3 +284,7 @@ class ChangeNowClientAsync:
             print(f"[ChangeNOW]   Примеры: {preview}{more}")
 
         return common
+
+    def get_failed_pairs_count(self) -> int:
+        """Возвращает количество неудачных пар"""
+        return len(self.failed_pairs)
