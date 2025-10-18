@@ -16,14 +16,48 @@ MIN_SPREAD = float(os.getenv("MIN_SPREAD", 0.5))
 SHOW_TOP = int(os.getenv("SHOW_TOP", 10))
 
 # Максимальная прибыль в процентах (для фильтрации ошибок)
-MAX_REASONABLE_SPREAD = 10.0  # 10% - максимальный реалистичный спред
+MAX_REASONABLE_SPREAD = float(os.getenv("MAX_REASONABLE_SPREAD", 10.0))
 
 # ============================================================================
 # ФИЛЬТРАЦИЯ МОНЕТ
 # ============================================================================
+# Чёрный список - монеты, которые НЕ будут использоваться в арбитраже
 BLACKLIST_COINS = set()
+
+# Белый список - если задан, будут использоваться ТОЛЬКО эти монеты
+# Пример популярных монет с высокой ликвидностью:
+# WHITELIST_COINS = {'BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'SOL', 'DOT', 'MATIC', 'LTC', 'AVAX', 'LINK', 'UNI', 'ATOM', 'ETC', 'XLM', 'FIL', 'TRX', 'ALGO', 'VET'}
 WHITELIST_COINS = set()
-ENABLE_COIN_FILTER = False  # Отключаем фильтрацию - берём ВСЕ монеты
+
+# Включить фильтрацию монет (True = использовать белый/чёрный список)
+ENABLE_COIN_FILTER = False  # По умолчанию отключено - анализируем все монеты
+
+# ============================================================================
+# ФИЛЬТРАЦИЯ ПО ЛИКВИДНОСТИ (КРИТИЧНО ДЛЯ ИЗБЕЖАНИЯ ПРОСКАЛЬЗЫВАНИЯ!)
+# ============================================================================
+
+# Минимальный объём торгов за 24 часа в USDT
+# Рекомендуемые значения:
+# - 10,000 USDT - для тестов (много пар, но могут быть неликвидные)
+# - 50,000 USDT - консервативно (хороший баланс)
+# - 100,000 USDT - безопасно (только ликвидные пары)
+# - 500,000 USDT - очень консервативно (топовые монеты)
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", 50000.0))
+
+# Минимальная оценка ликвидности (0-100)
+# Учитывает объём, оборот и спред bid/ask
+# Рекомендуемые значения:
+# - 20 - для тестов (много пар)
+# - 30 - консервативно (хорошая ликвидность)
+# - 40 - безопасно (высокая ликвидность)
+# - 50 - очень консервативно (только топ)
+MIN_LIQUIDITY_SCORE = float(os.getenv("MIN_LIQUIDITY_SCORE", 30.0))
+
+# Использовать ТОЛЬКО монеты из топ-N по ликвидности
+# 0 = отключено, использовать все подходящие
+# 50 = использовать только топ-50 самых ликвидных монет
+# 100 = использовать только топ-100
+USE_ONLY_TOP_LIQUID_COINS = int(os.getenv("USE_ONLY_TOP_LIQUID_COINS", 0))
 
 # ============================================================================
 # НАСТРОЙКИ API ЗАПРОСОВ
@@ -43,31 +77,16 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
 # ============================================================================
-# BINANCE API SETTINGS
+# НАСТРОЙКИ ВНУТРИБИРЖЕВОГО АРБИТРАЖА
 # ============================================================================
-BINANCE_API_URL = os.getenv("BINANCE_API_URL", "https://api.binance.com")
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+# Проверять треугольный арбитраж (3 сделки: USDT -> A -> B -> USDT)
+CHECK_TRIANGULAR = True
 
-# ============================================================================
-# CHANGENOW API SETTINGS
-# ============================================================================
-CHANGENOW_API_KEY = os.getenv("CHANGENOW_API_KEY", "")
+# Проверять четырехугольный арбитраж (4 сделки: USDT -> A -> B -> C -> USDT)
+CHECK_QUADRILATERAL = True
 
-# ============================================================================
-# SWAPZONE API SETTINGS
-# ============================================================================
-SWAPZONE_API_KEY = os.getenv("SWAPZONE_API_KEY", "XQZenodya")
-
-# ============================================================================
-# НАСТРОЙКИ АНАЛИЗА ОБМЕННИКОВ
-# ============================================================================
-MAX_PAIRS_TO_CHECK = int(os.getenv("MAX_PAIRS_TO_CHECK", 150))
-EXCHANGE_REQUEST_DELAY = float(os.getenv("EXCHANGE_REQUEST_DELAY", 0.0))
-MIN_EXCHANGE_AMOUNT = float(os.getenv("MIN_EXCHANGE_AMOUNT", 10.0))
-MAX_EXCHANGE_AMOUNT = float(os.getenv("MAX_EXCHANGE_AMOUNT", 10000.0))
-CACHE_FAILED_PAIRS = True
-PARALLEL_EXCHANGE_REQUESTS = int(os.getenv("PARALLEL_EXCHANGE_REQUESTS", 20))
+# Лимит монет для четырехугольного арбитража (чтобы не перегружать)
+QUAD_MAX_COINS = int(os.getenv("QUAD_MAX_COINS", 100))
 
 # ============================================================================
 # DIRECTORIES
@@ -86,18 +105,20 @@ if DEBUG:
     print("\n===== CONFIG SUMMARY =====")
     print(f"START_AMOUNT = {START_AMOUNT}")
     print(f"MIN_SPREAD = {MIN_SPREAD}")
+    print(f"MAX_REASONABLE_SPREAD = {MAX_REASONABLE_SPREAD}")
     print(f"SHOW_TOP = {SHOW_TOP}")
     print(f"ENABLE_COIN_FILTER = {ENABLE_COIN_FILTER}")
-    print(f"MAX_PAIRS_TO_CHECK = {MAX_PAIRS_TO_CHECK}")
-    print(f"EXCHANGE_REQUEST_DELAY = {EXCHANGE_REQUEST_DELAY}")
+    print(f"WHITELIST_COINS = {len(WHITELIST_COINS)} монет" if WHITELIST_COINS else "WHITELIST_COINS = не задан")
+    print(f"BLACKLIST_COINS = {len(BLACKLIST_COINS)} монет" if BLACKLIST_COINS else "BLACKLIST_COINS = пуст")
+    print(f"CHECK_TRIANGULAR = {CHECK_TRIANGULAR}")
+    print(f"CHECK_QUADRILATERAL = {CHECK_QUADRILATERAL}")
+    print(f"QUAD_MAX_COINS = {QUAD_MAX_COINS}")
     print(f"MAX_CONCURRENT_REQUESTS = {MAX_CONCURRENT_REQUESTS}")
     print(f"REQUEST_DELAY = {REQUEST_DELAY}")
     print(f"MAX_RETRIES = {MAX_RETRIES}")
     print(f"REQUEST_TIMEOUT = {REQUEST_TIMEOUT}")
-    print(f"CACHE_FAILED_PAIRS = {CACHE_FAILED_PAIRS}")
     print(f"BYBIT_API_URL = {BYBIT_API_URL}")
-    print(f"BINANCE_API_URL = {BINANCE_API_URL}")
-    print(f"CHANGENOW_API_KEY = {'задан' if CHANGENOW_API_KEY else 'не задан'}")
+    print(f"BYBIT_API_KEY = {'задан' if BYBIT_API_KEY else 'не задан'}")
     print(f"RESULTS_DIR = {RESULTS_DIR}")
     print(f"LOGS_DIR = {LOGS_DIR}")
     print("===========================\n")

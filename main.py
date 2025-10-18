@@ -1,15 +1,281 @@
 import asyncio
 from datetime import datetime
-from configs import START_AMOUNT, MIN_SPREAD, SHOW_TOP
+from configs import START_AMOUNT, MIN_SPREAD, SHOW_TOP, MAX_REASONABLE_SPREAD
 from bybit_handler import BybitClientAsync
-from logs.binance_handler import BinanceClientAsync
-from arbitrage_analyzer import ArbitrageAnalyzerAsync
 from results_saver import ResultsSaver
 
 
+# ============================================================================
+# КЛАСС АНАЛИЗАТОРА (временно в main.py)
+# ============================================================================
+
+class InternalArbitrageAnalyzer:
+    """Анализатор внутрибиржевого арбитража на Bybit"""
+
+    def __init__(self, bybit_client):
+        self.bybit = bybit_client
+        self.found_count = 0
+        self.checked_count = 0
+
+    async def find_arbitrage_opportunities(
+            self,
+            start_amount: float = 100.0,
+            min_spread: float = 0.3,
+            max_spread: float = 50.0,
+            check_triangular: bool = True,
+            check_quadrilateral: bool = True
+    ):
+        """Ищет внутрибиржевые арбитражные возможности"""
+        print(f"\n[Analyzer] 🔍 Начало поиска внутрибиржевого арбитража на Bybit")
+        print(f"[Analyzer] Параметры: начальная сумма = ${start_amount}, спред = {min_spread}%-{max_spread}%")
+
+        opportunities = []
+        self.found_count = 0
+        self.checked_count = 0
+
+        # Треугольный арбитраж
+        if check_triangular:
+            print("\n" + "=" * 100)
+            print("[Analyzer] 🔺 Поиск треугольного арбитража: USDT -> A -> B -> USDT")
+            print("=" * 100)
+
+            tri_opps = await self._find_triangular_arbitrage(start_amount, min_spread, max_spread)
+            opportunities.extend(tri_opps)
+
+            print("=" * 100)
+            print(f"[Analyzer] ✓ Треугольный: найдено {len(tri_opps)} возможностей\n")
+
+        # Четырехугольный арбитраж
+        if check_quadrilateral:
+            print("=" * 100)
+            print("[Analyzer] 🔶 Поиск четырехугольного арбитража: USDT -> A -> B -> C -> USDT")
+            print("=" * 100)
+
+            quad_opps = await self._find_quadrilateral_arbitrage(start_amount, min_spread, max_spread)
+            opportunities.extend(quad_opps)
+
+            print("=" * 100)
+            print(f"[Analyzer] ✓ Четырехугольный: найдено {len(quad_opps)} возможностей\n")
+
+        return opportunities
+
+    async def _find_triangular_arbitrage(self, start_amount, min_spread, max_spread):
+        """Треугольный арбитраж: USDT -> CoinA -> CoinB -> USDT"""
+        opportunities = []
+        usdt_coins = list(self.bybit.usdt_pairs.keys())
+
+        print(f"[Triangular] Монет с USDT-парами: {len(usdt_coins)}")
+
+        for i, coin_a in enumerate(usdt_coins):
+            price_usdt_to_a = self.bybit.usdt_pairs.get(coin_a)
+            if not price_usdt_to_a or price_usdt_to_a <= 0:
+                continue
+
+            amount_a = start_amount / price_usdt_to_a
+
+            for coin_b in usdt_coins[i + 1:]:
+                if coin_a == coin_b:
+                    continue
+
+                self.checked_count += 1
+
+                if self.checked_count % 500 == 0:
+                    print(f"[Triangular] 📊 Проверено: {self.checked_count} | Найдено: {self.found_count}")
+
+                price_a_to_b = self.bybit.get_price(coin_a, coin_b)
+                if price_a_to_b is None or price_a_to_b <= 0:
+                    continue
+
+                amount_b = amount_a * price_a_to_b
+
+                price_b_to_usdt = self.bybit.usdt_pairs.get(coin_b)
+                if not price_b_to_usdt or price_b_to_usdt <= 0:
+                    continue
+
+                final_usdt = amount_b * price_b_to_usdt
+                spread = ((final_usdt - start_amount) / start_amount) * 100
+
+                if spread < min_spread or spread > max_spread:
+                    continue
+
+                if amount_a <= 0 or amount_b <= 0 or final_usdt <= 0:
+                    continue
+
+                opp = {
+                    'type': 'triangular',
+                    'path': f"USDT → {coin_a} → {coin_b} → USDT",
+                    'scheme': 'Bybit Internal',
+                    'coins': [coin_a, coin_b],
+                    'initial': start_amount,
+                    'final': final_usdt,
+                    'profit': final_usdt - start_amount,
+                    'spread': spread,
+                    'steps': [
+                        f"1️⃣  Купить {amount_a:.8f} {coin_a} за {start_amount:.2f} USDT (курс: 1 {coin_a} = {price_usdt_to_a:.8f} USDT)",
+                        f"2️⃣  Обменять {amount_a:.8f} {coin_a} на {amount_b:.8f} {coin_b} (курс: 1 {coin_a} = {price_a_to_b:.8f} {coin_b})",
+                        f"3️⃣  Продать {amount_b:.8f} {coin_b} за {final_usdt:.2f} USDT (курс: 1 {coin_b} = {price_b_to_usdt:.8f} USDT)"
+                    ],
+                    'timestamp': datetime.now().isoformat()
+                }
+
+                opportunities.append(opp)
+                self.found_count += 1
+                self._print_opportunity(opp, self.found_count)
+
+        return opportunities
+
+    async def _find_quadrilateral_arbitrage(self, start_amount, min_spread, max_spread):
+        """Четырехугольный арбитраж: USDT -> CoinA -> CoinB -> CoinC -> USDT"""
+        opportunities = []
+        usdt_coins = list(self.bybit.usdt_pairs.keys())
+
+        print(f"[Quadrilateral] Монет с USDT-парами: {len(usdt_coins)}")
+
+        top_coins = usdt_coins[:100]
+        quad_checked = 0
+
+        for coin_a in top_coins:
+            price_usdt_to_a = self.bybit.usdt_pairs.get(coin_a)
+            if not price_usdt_to_a or price_usdt_to_a <= 0:
+                continue
+
+            amount_a = start_amount / price_usdt_to_a
+            available_b = self.bybit.get_available_quotes_for(coin_a)
+            available_b = available_b & set(top_coins)
+
+            for coin_b in available_b:
+                if coin_b == coin_a or coin_b == 'USDT':
+                    continue
+
+                price_a_to_b = self.bybit.get_price(coin_a, coin_b)
+                if price_a_to_b is None or price_a_to_b <= 0:
+                    continue
+
+                amount_b = amount_a * price_a_to_b
+                available_c = self.bybit.get_available_quotes_for(coin_b)
+                available_c = available_c & set(top_coins)
+
+                for coin_c in available_c:
+                    if coin_c == coin_a or coin_c == coin_b or coin_c == 'USDT':
+                        continue
+
+                    if not self.bybit.has_trading_pair(coin_c, 'USDT'):
+                        continue
+
+                    quad_checked += 1
+
+                    if quad_checked % 1000 == 0:
+                        print(f"[Quadrilateral] 📊 Проверено: {quad_checked} | Найдено: {self.found_count}")
+
+                    price_b_to_c = self.bybit.get_price(coin_b, coin_c)
+                    if price_b_to_c is None or price_b_to_c <= 0:
+                        continue
+
+                    amount_c = amount_b * price_b_to_c
+
+                    price_c_to_usdt = self.bybit.usdt_pairs.get(coin_c)
+                    if not price_c_to_usdt or price_c_to_usdt <= 0:
+                        continue
+
+                    final_usdt = amount_c * price_c_to_usdt
+                    spread = ((final_usdt - start_amount) / start_amount) * 100
+
+                    if spread < min_spread or spread > max_spread:
+                        continue
+
+                    if amount_a <= 0 or amount_b <= 0 or amount_c <= 0 or final_usdt <= 0:
+                        continue
+
+                    opp = {
+                        'type': 'quadrilateral',
+                        'path': f"USDT → {coin_a} → {coin_b} → {coin_c} → USDT",
+                        'scheme': 'Bybit Internal (4-way)',
+                        'coins': [coin_a, coin_b, coin_c],
+                        'initial': start_amount,
+                        'final': final_usdt,
+                        'profit': final_usdt - start_amount,
+                        'spread': spread,
+                        'steps': [
+                            f"1️⃣  Купить {amount_a:.8f} {coin_a} за {start_amount:.2f} USDT",
+                            f"2️⃣  Обменять {amount_a:.8f} {coin_a} на {amount_b:.8f} {coin_b}",
+                            f"3️⃣  Обменять {amount_b:.8f} {coin_b} на {amount_c:.8f} {coin_c}",
+                            f"4️⃣  Продать {amount_c:.8f} {coin_c} за {final_usdt:.2f} USDT"
+                        ],
+                        'timestamp': datetime.now().isoformat()
+                    }
+
+                    opportunities.append(opp)
+                    self.found_count += 1
+                    self._print_opportunity(opp, self.found_count)
+
+        return opportunities
+
+    def _print_opportunity(self, opp, rank):
+        """Выводит найденную возможность в консоль"""
+        icon = "🔺" if opp['type'] == 'triangular' else "🔶"
+        print(f"\n{icon} НАЙДЕНА СВЯЗКА #{rank} ({opp['type'].upper()})")
+        print(f"{'─' * 100}")
+        print(f"   📍 Путь: {opp['path']}")
+        print(f"   💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+        print(f"   💵 ${opp['initial']:.2f} → ${opp['final']:.2f}")
+        print(f"{'─' * 100}")
+
+    async def analyze_specific_path(self, path, start_amount=100.0):
+        """Анализирует конкретный путь"""
+        print(f"\n[Analyzer] 🔬 Детальный анализ пути: {' → '.join(path)}")
+
+        if len(path) < 3:
+            return {'error': 'Путь должен содержать минимум 3 монеты'}
+
+        if path[0] != 'USDT' or path[-1] != 'USDT':
+            return {'error': 'Путь должен начинаться и заканчиваться на USDT'}
+
+        try:
+            current_amount = start_amount
+            steps = []
+
+            for i in range(len(path) - 1):
+                from_coin = path[i]
+                to_coin = path[i + 1]
+
+                price = self.bybit.get_price(from_coin, to_coin)
+
+                if price is None:
+                    return {'error': f'Пара {from_coin}/{to_coin} не найдена'}
+
+                new_amount = current_amount * price
+                step_info = f"{i + 1}. {current_amount:.8f} {from_coin} → {new_amount:.8f} {to_coin} (курс: {price:.8f})"
+                steps.append(step_info)
+                print(f"   {step_info}")
+
+                current_amount = new_amount
+
+            final_usdt = current_amount
+            spread = ((final_usdt - start_amount) / start_amount) * 100
+            profit = final_usdt - start_amount
+
+            print(f"\n   ✅ Итог: {spread:.4f}% ({'+' if profit >= 0 else ''}{profit:.4f} USDT)")
+
+            return {
+                'success': True,
+                'path': ' → '.join(path),
+                'spread': spread,
+                'profit': profit,
+                'final': final_usdt
+            }
+
+        except Exception as e:
+            print(f"   ❌ Ошибка: {e}")
+            return {'error': str(e)}
+
+
+# ============================================================================
+# ОСНОВНАЯ ФУНКЦИЯ
+# ============================================================================
+
 async def main():
     print("=" * 100)
-    print("🚀 CRYPTO ARBITRAGE BOT v5.0 — ПРЯМОЙ И ТРЕУГОЛЬНЫЙ АРБИТРАЖ")
+    print("🚀 CRYPTO ARBITRAGE BOT v6.0 — ВНУТРИБИРЖЕВОЙ АРБИТРАЖ НА BYBIT")
     print("=" * 100)
 
     start_time = datetime.now()
@@ -19,116 +285,66 @@ async def main():
     print(f"🎯 Показывать топ: {SHOW_TOP} связок")
 
     print(f"\n🔍 Типы арбитража:")
-    print(f"   1️⃣  ПРЯМОЙ: USDT → LTC → USDT (Bybit ↔ Binance)")
-    print(f"   2️⃣  ТРЕУГОЛЬНЫЙ: USDT → LTC → BNB → USDT (одна биржа)")
-    print(f"   3️⃣  КРОСС-ТРЕУГОЛЬНЫЙ: USDT → LTC → BNB → USDT (Bybit → Binance)\n")
+    print(f"   1️⃣  ТРЕУГОЛЬНЫЙ: USDT → LTC → BNB → USDT (3 сделки)")
+    print(f"   2️⃣  ЧЕТЫРЕХУГОЛЬНЫЙ: USDT → BTC → ETH → BNB → USDT (4 сделки)\n")
 
-    # ───────────────────────────────────────────────────────────────
-    # ШАГ 1: Загрузка данных с бирж
-    # ───────────────────────────────────────────────────────────────
     print("=" * 100)
-    print("📊 ШАГ 1: ЗАГРУЗКА ДАННЫХ С БИРЖ")
+    print("📊 ШАГ 1: ЗАГРУЗКА ДАННЫХ С BYBIT")
     print("=" * 100)
 
-    async with BybitClientAsync() as bybit, BinanceClientAsync() as binance:
-        # Загружаем данные параллельно
-        await asyncio.gather(
-            bybit.load_usdt_pairs(),
-            binance.load_usdt_pairs()
-        )
+    async with BybitClientAsync() as bybit:
+        await bybit.load_usdt_pairs()
 
-        print(f"\n[Bybit] ✓ Загружено {len(bybit.usdt_pairs)} пар")
-        print(f"[Binance] ✓ Загружено {len(binance.usdt_pairs)} пар")
+        print(f"\n[Bybit] ✓ Загружено {len(bybit.usdt_pairs)} USDT-пар")
+        print(f"[Bybit] ✓ Всего уникальных монет: {len(bybit.coins)}")
+        print(f"[Bybit] ✓ Всего торговых пар: {len(bybit.trading_pairs)}")
 
-        # Общие монеты - ДИАГНОСТИКА
-        common_coins = bybit.coins & binance.coins
-        print(f"\n✅ Общих монет на обеих биржах: {len(common_coins)}")
-
-        if len(common_coins) > 0:
-            preview = ', '.join(sorted(list(common_coins)[:20]))
-            more = f" и еще {len(common_coins) - 20}" if len(common_coins) > 20 else ""
-            print(f"   Примеры: {preview}{more}")
-        else:
-            print(f"\n❌ КРИТИЧЕСКАЯ ПРОБЛЕМА: Нет общих монет!")
-            print(f"   Bybit монеты (первые 20): {', '.join(sorted(list(bybit.coins))[:20])}")
-            print(f"   Binance монеты (первые 20): {', '.join(sorted(list(binance.coins))[:20])}")
-            print(f"\n💡 Проверьте:")
-            print(f"   1. Доступность API бирж")
-            print(f"   2. Правильность парсинга символов")
-            print(f"   3. Фильтры монет в configs.py")
+        if len(bybit.trading_pairs) == 0:
+            print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА: Не загружены торговые пары!")
             return
 
-        # ───────────────────────────────────────────────────────────────
-        # ШАГ 2: Анализ арбитража с выводом в реальном времени
-        # ───────────────────────────────────────────────────────────────
         print("\n" + "=" * 100)
-        print("📊 ШАГ 2: ПОИСК АРБИТРАЖНЫХ ВОЗМОЖНОСТЕЙ")
+        print("📊 ШАГ 2: ТЕСТОВЫЙ АНАЛИЗ ПРИМЕРОВ")
+        print("=" * 100)
+
+        analyzer = InternalArbitrageAnalyzer(bybit)
+
+        print("\n🔬 Пример 1: Треугольный арбитраж")
+        await analyzer.analyze_specific_path(['USDT', 'LTC', 'BNB', 'USDT'], START_AMOUNT)
+
+        print("\n🔬 Пример 2: Четырехугольный арбитраж")
+        await analyzer.analyze_specific_path(['USDT', 'BTC', 'ETH', 'BNB', 'USDT'], START_AMOUNT)
+
+        print("\n" + "=" * 100)
+        print("📊 ШАГ 3: ПОИСК ВСЕХ АРБИТРАЖНЫХ ВОЗМОЖНОСТЕЙ")
         print("=" * 100)
         print("\n💡 Результаты выводятся по мере обнаружения...\n")
-
-        analyzer = ArbitrageAnalyzerAsync(bybit, binance)
 
         opportunities = await analyzer.find_arbitrage_opportunities(
             start_amount=START_AMOUNT,
             min_spread=MIN_SPREAD,
-            top_count=None  # Получаем все, сортировку сделаем в конце
+            max_spread=MAX_REASONABLE_SPREAD,
+            check_triangular=True,
+            check_quadrilateral=True
         )
 
-        # ───────────────────────────────────────────────────────────────
-        # ШАГ 3: Итоговые результаты (отсортированные по прибыли)
-        # ───────────────────────────────────────────────────────────────
         if opportunities:
-            # Сортируем по прибыли (не спреду!)
             opportunities.sort(key=lambda x: x['profit'], reverse=True)
 
             print("\n" + "=" * 100)
-            print("📈 ИТОГОВАЯ СТАТИСТИКА (ОТСОРТИРОВАНО ПО ПРИБЫЛИ)")
+            print("📈 ИТОГОВАЯ СТАТИСТИКА")
             print("=" * 100)
 
-            # Статистика
-            total_profit = sum(opp['profit'] for opp in opportunities)
-            avg_spread = sum(opp['spread'] for opp in opportunities) / len(opportunities)
-            max_profit_opp = opportunities[0]
-
-            print(f"\n📊 Общая статистика:")
-            print(f"   • Всего связок найдено: {len(opportunities)}")
-            print(f"   • Суммарная потенциальная прибыль: ${total_profit:.2f}")
-            print(f"   • Средний спред: {avg_spread:.4f}%")
-            print(f"   • Максимальная прибыль: ${max_profit_opp['profit']:.2f} ({max_profit_opp['spread']:.4f}%)")
-
-            # Статистика по типам
-            types_count = {}
-            for opp in opportunities:
-                opp_type = opp.get('type', 'unknown')
-                types_count[opp_type] = types_count.get(opp_type, 0) + 1
-
-            print(f"\n📋 Распределение по типам:")
-            type_names = {
-                'direct': '🔄 Прямой арбитраж',
-                'triangular_single': '🔺 Треугольный (одна биржа)',
-                'triangular_cross': '🔀 Треугольный (кросс-биржевой)'
-            }
-            for opp_type, count in types_count.items():
-                print(f"   • {type_names.get(opp_type, opp_type)}: {count}")
-
-            # Топ лучших по прибыли
-            print("\n" + "=" * 100)
-            print(f"🏆 ТОП-{min(SHOW_TOP, len(opportunities))} СВЯЗОК ПО ПРИБЫЛИ:")
+            print(f"\n📊 Всего найдено: {len(opportunities)} связок")
+            print(f"\n🏆 ТОП-{min(SHOW_TOP, len(opportunities))} ЛУЧШИХ:")
             print("=" * 100)
 
             for idx, opp in enumerate(opportunities[:SHOW_TOP], 1):
-                print(f"\n{'─' * 100}")
-                print(f"#{idx} | {opp['scheme']} | {opp['path']}")
-                print(f"{'─' * 100}")
-                print(f"💰 Прибыль: ${opp['profit']:.4f} | Спред: {opp['spread']:.4f}%")
-                print(f"💵 Начальная сумма: ${opp['initial']:.2f} → Финальная: ${opp['final']:.2f}")
-                print(f"\n📝 Пошаговые действия:")
-                for step in opp['steps']:
-                    print(f"   {step}")
+                icon = "🔺" if opp['type'] == 'triangular' else "🔶"
+                print(f"\n#{idx} {icon} | {opp['path']}")
+                print(f"   💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+                print(f"   💵 ${opp['initial']:.2f} → ${opp['final']:.2f}")
 
-            # ───────────────────────────────────────────────────────────────
-            # ШАГ 4: Сохранение результатов
-            # ───────────────────────────────────────────────────────────────
             print("\n" + "=" * 100)
             print("💾 СОХРАНЕНИЕ РЕЗУЛЬТАТОВ")
             print("=" * 100)
@@ -150,32 +366,14 @@ async def main():
                 print(f"   • {fmt.upper()} → {path}")
 
         else:
-            print(f"\n❌ Арбитражных связок со спредом >= {MIN_SPREAD}% не найдено")
-            print(f"💡 Попробуйте:")
-            print(f"   - Уменьшить MIN_SPREAD в configs.py")
-            print(f"   - Проверить доступность торговых пар")
+            print(f"\n❌ Арбитражных связок не найдено")
 
-    # ───────────────────────────────────────────────────────────────
-    # ИТОГИ
-    # ───────────────────────────────────────────────────────────────
     end_time = datetime.now()
     elapsed = (end_time - start_time).total_seconds()
 
     print("\n" + "=" * 100)
     print(f"✅ АНАЛИЗ ЗАВЕРШЁН ЗА {elapsed:.2f} СЕКУНД")
     print("=" * 100)
-
-    print("\n⚠️  ВАЖНЫЕ ЗАМЕЧАНИЯ:")
-    print("   • Указанные спреды НЕ учитывают:")
-    print("     - Комиссии бирж за покупку/продажу (~0.1-0.2%)")
-    print("     - Комиссии сети за переводы (0.0001-0.01 монеты)")
-    print("     - Проскальзывание цены при больших объёмах")
-    print("   • Время выполнения связки:")
-    print("     - Прямой арбитраж: 10-30 минут (время перевода)")
-    print("     - Треугольный: мгновенно (на одной бирже)")
-    print("     - Кросс-треугольный: 10-30 минут")
-    print("   • Цены постоянно меняются - проверяйте актуальность перед сделкой!")
-    print("   • Всегда делайте тестовые сделки с минимальной суммой!")
 
 
 if __name__ == "__main__":
@@ -186,4 +384,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Критическая ошибка: {e}")
         import traceback
+
         traceback.print_exc()

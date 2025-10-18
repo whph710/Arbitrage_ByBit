@@ -7,7 +7,7 @@ from configs import RESULTS_DIR
 
 
 class ResultsSaver:
-    """Класс для сохранения результатов арбитража в различных форматах"""
+    """Класс для сохранения результатов внутрибиржевого арбитража"""
 
     def __init__(self, results_dir: Path = RESULTS_DIR):
         self.results_dir = results_dir
@@ -19,11 +19,9 @@ class ResultsSaver:
             start_amount: float,
             min_spread: float,
             execution_time: float,
-            save_formats: List[str] = ['json', 'txt', 'csv']
+            save_formats: List[str] = ['json', 'txt', 'csv', 'html']
     ) -> Dict[str, Path]:
-        """
-        Сохраняет результаты в указанных форматах
-        """
+        """Сохраняет результаты в указанных форматах"""
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         saved_files = {}
 
@@ -33,30 +31,31 @@ class ResultsSaver:
             'start_amount': start_amount,
             'min_spread': min_spread,
             'execution_time': execution_time,
-            'total_opportunities': len(opportunities)
+            'total_opportunities': len(opportunities),
+            'arbitrage_type': 'internal_bybit'
         }
 
         # Сохранение в JSON
         if 'json' in save_formats:
-            json_path = self.results_dir / f'arbitrage_{timestamp}.json'
+            json_path = self.results_dir / f'internal_arbitrage_{timestamp}.json'
             self._save_json(json_path, opportunities, metadata)
             saved_files['json'] = json_path
 
         # Сохранение в TXT
         if 'txt' in save_formats:
-            txt_path = self.results_dir / f'arbitrage_{timestamp}.txt'
+            txt_path = self.results_dir / f'internal_arbitrage_{timestamp}.txt'
             self._save_txt(txt_path, opportunities, metadata)
             saved_files['txt'] = txt_path
 
         # Сохранение в CSV
         if 'csv' in save_formats:
-            csv_path = self.results_dir / f'arbitrage_{timestamp}.csv'
+            csv_path = self.results_dir / f'internal_arbitrage_{timestamp}.csv'
             self._save_csv(csv_path, opportunities, metadata)
             saved_files['csv'] = csv_path
 
         # Сохранение в HTML
         if 'html' in save_formats:
-            html_path = self.results_dir / f'arbitrage_{timestamp}.html'
+            html_path = self.results_dir / f'internal_arbitrage_{timestamp}.html'
             self._save_html(html_path, opportunities, metadata)
             saved_files['html'] = html_path
 
@@ -77,7 +76,7 @@ class ResultsSaver:
         with open(path, 'w', encoding='utf-8') as f:
             # Заголовок
             f.write("=" * 100 + "\n")
-            f.write("🚀 CRYPTO ARBITRAGE BOT — РЕЗУЛЬТАТЫ АНАЛИЗА\n")
+            f.write("🚀 CRYPTO ARBITRAGE BOT v6.0 — ВНУТРИБИРЖЕВОЙ АРБИТРАЖ НА BYBIT\n")
             f.write("=" * 100 + "\n\n")
 
             # Метаданные
@@ -95,9 +94,8 @@ class ResultsSaver:
                 f.write("=" * 100 + "\n\n")
 
                 type_names = {
-                    'direct': '🔄 Прямой арбитраж',
-                    'triangular_single': '🔺 Треугольный (одна биржа)',
-                    'triangular_cross': '🔀 Треугольный (кросс-биржевой)'
+                    'triangular': '🔺 Треугольный (3 сделки)',
+                    'quadrilateral': '🔶 Четырехугольный (4 сделки)'
                 }
 
                 for opp_type, stats in sorted(types_stats.items(), key=lambda x: x[1]['max_spread'], reverse=True):
@@ -105,6 +103,7 @@ class ResultsSaver:
                     f.write(f"{type_name}\n")
                     f.write(f"  • Найдено: {stats['count']} возможностей\n")
                     f.write(f"  • Макс. спред: {stats['max_spread']:.4f}%\n")
+                    f.write(f"  • Средний спред: {stats['avg_spread']:.4f}%\n")
                     f.write(f"  • Суммарная прибыль: ${stats['total_profit']:.2f}\n\n")
 
             # Детальный список возможностей
@@ -114,7 +113,8 @@ class ResultsSaver:
                 f.write("=" * 100 + "\n\n")
 
                 for idx, opp in enumerate(opportunities, 1):
-                    f.write(f"#{idx} | Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}\n")
+                    icon = "🔺" if opp['type'] == 'triangular' else "🔶"
+                    f.write(f"{icon} #{idx} | Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}\n")
                     f.write(f"    Тип: {opp.get('type', 'N/A')}\n")
                     f.write(f"    Схема: {opp['scheme']}\n")
                     f.write(f"    Путь: {opp['path']}\n")
@@ -128,12 +128,13 @@ class ResultsSaver:
             f.write("\n" + "=" * 100 + "\n")
             f.write("⚠️  ВАЖНЫЕ ЗАМЕЧАНИЯ\n")
             f.write("=" * 100 + "\n\n")
-            f.write("1. Указанные спреды НЕ учитывают комиссии бирж (обычно 0.1-0.2% за сделку)\n")
-            f.write("2. Переводы между биржами требуют времени и комиссий за вывод\n")
-            f.write("3. Проскальзывание цены может съесть часть прибыли\n")
-            f.write("4. Треугольный арбитраж требует наличия реальных торговых пар\n")
-            f.write("5. Для кросс-биржевого арбитража учитывайте время подтверждения транзакций\n")
-            f.write("6. Всегда проверяйте актуальность данных перед совершением сделок!\n")
+            f.write("1. Указанные спреды НЕ учитывают комиссии биржи (~0.1% за сделку)\n")
+            f.write("2. Треугольный арбитраж: 3 сделки = ~0.3% комиссий\n")
+            f.write("3. Четырехугольный арбитраж: 4 сделки = ~0.4% комиссий\n")
+            f.write("4. Проскальзывание цены может съесть часть прибыли\n")
+            f.write("5. Все сделки должны выполняться последовательно и быстро\n")
+            f.write("6. Используйте монеты с высокой ликвидностью для минимизации проскальзывания\n")
+            f.write("7. Всегда проверяйте актуальность данных перед совершением сделок!\n")
 
     def _save_csv(self, path: Path, opportunities: List[Dict], metadata: Dict):
         """Сохранение в CSV формате"""
@@ -150,6 +151,7 @@ class ResultsSaver:
                 'Profit $',
                 'Initial $',
                 'Final $',
+                'Num Coins',
                 'Coins',
                 'Steps'
             ])
@@ -158,6 +160,7 @@ class ResultsSaver:
             for idx, opp in enumerate(opportunities, 1):
                 opp_type = opp.get('type', 'N/A')
                 coins = ' → '.join(opp.get('coins', []))
+                num_coins = len(opp.get('coins', []))
                 steps = ' | '.join(opp.get('steps', []))
 
                 writer.writerow([
@@ -166,9 +169,10 @@ class ResultsSaver:
                     opp['scheme'],
                     opp['path'],
                     f"{opp['spread']:.4f}",
-                    f"{opp['profit']:.2f}",
+                    f"{opp['profit']:.4f}",
                     f"{opp['initial']:.2f}",
                     f"{opp['final']:.2f}",
+                    num_coins,
                     coins,
                     steps
                 ])
@@ -177,15 +181,13 @@ class ResultsSaver:
         """Сохранение в HTML формате с красивым оформлением"""
 
         type_names = {
-            'direct': '🔄 Прямой',
-            'triangular_single': '🔺 Треугольный',
-            'triangular_cross': '🔀 Кросс-биржевой'
+            'triangular': '🔺 Треугольный',
+            'quadrilateral': '🔶 Четырехугольный'
         }
 
         type_colors = {
-            'direct': '#667eea',
-            'triangular_single': '#28a745',
-            'triangular_cross': '#fd7e14'
+            'triangular': '#28a745',
+            'quadrilateral': '#fd7e14'
         }
 
         html_content = f"""<!DOCTYPE html>
@@ -193,7 +195,7 @@ class ResultsSaver:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Arbitrage Results - {metadata['timestamp']}</title>
+    <title>Internal Arbitrage Results - {metadata['timestamp']}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f5f5; padding: 20px; }}
@@ -226,8 +228,8 @@ class ResultsSaver:
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Crypto Arbitrage Bot v3.0 — Результаты анализа</h1>
-            <p>Прямой и треугольный арбитраж между Bybit и Binance</p>
+            <h1>🚀 Crypto Arbitrage Bot v6.0 — Внутрибиржевой арбитраж на Bybit</h1>
+            <p>Треугольный и четырехугольный арбитраж</p>
         </div>
 
         <div class="metadata">
@@ -269,6 +271,7 @@ class ResultsSaver:
                 <strong>{type_name}</strong><br>
                 Найдено: {stats['count']} возможностей | 
                 Макс. спред: {stats['max_spread']:.4f}% | 
+                Средний спред: {stats['avg_spread']:.4f}% |
                 Суммарная прибыль: ${stats['total_profit']:.2f}
             </div>
 """
@@ -323,12 +326,14 @@ class ResultsSaver:
         <div class="warning">
             <h3>⚠️ Важные замечания</h3>
             <ul>
-                <li>Указанные спреды НЕ учитывают комиссии бирж (обычно 0.1-0.2% за сделку)</li>
-                <li>Переводы между биржами требуют времени и комиссий за вывод</li>
+                <li>Указанные спреды НЕ учитывают комиссии биржи (~0.1% за сделку)</li>
+                <li>Треугольный арбитраж: 3 сделки = ~0.3% комиссий</li>
+                <li>Четырехугольный арбитраж: 4 сделки = ~0.4% комиссий</li>
                 <li>Проскальзывание цены может съесть часть прибыли</li>
-                <li>Треугольный арбитраж требует наличия реальных торговых пар (не только USDT-пар)</li>
-                <li>Для кросс-биржевого арбитража учитывайте время подтверждения транзакций</li>
-                <li>Всегда проверяйте актуальность данных перед совершением сделок!</li>
+                <li>Все сделки должны выполняться последовательно и максимально быстро</li>
+                <li>Используйте монеты с высокой ликвидностью (BTC, ETH, BNB) для минимизации проскальзывания</li>
+                <li>Рекомендуется искать спреды > 1% для покрытия всех издержек</li>
+                <li>Цены постоянно меняются - всегда проверяйте актуальность перед сделкой!</li>
             </ul>
         </div>
     </div>
@@ -344,8 +349,23 @@ class ResultsSaver:
         for opp in opportunities:
             opp_type = opp.get('type', 'unknown')
             if opp_type not in types_stats:
-                types_stats[opp_type] = {'count': 0, 'max_spread': 0, 'total_profit': 0}
+                types_stats[opp_type] = {
+                    'count': 0,
+                    'max_spread': 0,
+                    'total_spread': 0,
+                    'total_profit': 0
+                }
             types_stats[opp_type]['count'] += 1
             types_stats[opp_type]['max_spread'] = max(types_stats[opp_type]['max_spread'], opp['spread'])
+            types_stats[opp_type]['total_spread'] += opp['spread']
             types_stats[opp_type]['total_profit'] += opp['profit']
+
+        # Вычисляем средний спред
+        for opp_type in types_stats:
+            count = types_stats[opp_type]['count']
+            if count > 0:
+                types_stats[opp_type]['avg_spread'] = types_stats[opp_type]['total_spread'] / count
+            else:
+                types_stats[opp_type]['avg_spread'] = 0
+
         return types_stats
