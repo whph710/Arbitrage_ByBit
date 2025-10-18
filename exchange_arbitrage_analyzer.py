@@ -1,6 +1,7 @@
 import asyncio
 from typing import List, Dict, Set
 from datetime import datetime
+from configs import EXCHANGE_REQUEST_DELAY
 
 
 class ExchangeArbitrageAnalyzer:
