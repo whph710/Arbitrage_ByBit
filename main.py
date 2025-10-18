@@ -4,7 +4,7 @@ from datetime import datetime
 from configs import START_AMOUNT, MIN_SPREAD, SHOW_TOP
 from bybit_handler import BybitClientAsync
 from binance_handler import BinanceClientAsync
-from bestchange_handler import BestChangeClientAsync
+from results.bestchange_handler import BestChangeClientAsync
 from arbitrage_analyzer import ArbitrageAnalyzerAsync
 from results_saver import ResultsSaver
 
