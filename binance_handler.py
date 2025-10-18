@@ -1,6 +1,6 @@
 import aiohttp
 from typing import Dict, Set
-from configs import BINANCE_API_URL, REQUEST_TIMEOUT
+from configs import BINANCE_API_URL, REQUEST_TIMEOUT, ENABLE_COIN_FILTER, BLACKLIST_COINS, WHITELIST_COINS
 
 
 class BinanceClientAsync:
@@ -9,13 +9,14 @@ class BinanceClientAsync:
     def __init__(self):
         self.base_url = BINANCE_API_URL
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/2.0)',
+            'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/3.0)',
             'Accept': 'application/json'
         }
         self.timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
         self.session = None
         self.usdt_pairs: Dict[str, float] = {}
         self.coins: Set[str] = set()
+        self.trading_pairs: Set[tuple] = set()  # Реальные торговые пары (base, quote)
 
     async def __aenter__(self):
         await self.create_session()
@@ -33,6 +34,25 @@ class BinanceClientAsync:
             await self.session.close()
             self.session = None
 
+    def _should_include_coin(self, coin: str) -> bool:
+        """
+        Проверяет, должна ли монета быть включена в анализ
+
+        Логика:
+        1. Если фильтр отключён - включаем всё
+        2. Если есть белый список - включаем только из него
+        3. Иначе включаем всё, кроме чёрного списка
+        """
+        if not ENABLE_COIN_FILTER:
+            return True
+
+        # Если задан белый список - используем только его
+        if WHITELIST_COINS:
+            return coin in WHITELIST_COINS
+
+        # Иначе исключаем только чёрный список
+        return coin not in BLACKLIST_COINS
+
     async def load_usdt_pairs(self):
         """Загружает все USDT-пары с Binance и сохраняет в usdt_pairs и coins"""
         if self.session is None:
@@ -46,6 +66,7 @@ class BinanceClientAsync:
 
             self.usdt_pairs.clear()
             self.coins.clear()
+            filtered_count = 0
 
             for ticker in data:
                 symbol = ticker.get('symbol', '').upper()
@@ -53,6 +74,11 @@ class BinanceClientAsync:
                     continue
 
                 base = symbol[:-4]  # Убираем 'USDT' из конца
+
+                # Применяем фильтр монет
+                if not self._should_include_coin(base):
+                    filtered_count += 1
+                    continue
 
                 try:
                     price = float(ticker.get('price', 0))
@@ -63,6 +89,8 @@ class BinanceClientAsync:
                     continue
 
             print(f"[Binance] ✓ Загружено {len(self.usdt_pairs)} торговых пар USDT")
+            if filtered_count > 0:
+                print(f"[Binance] 🔍 Отфильтровано монет: {filtered_count}")
 
         except Exception as e:
             print(f"[Binance] ❌ Ошибка при загрузке пар: {e}")

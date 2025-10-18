@@ -9,31 +9,53 @@ if ENV_PATH.exists():
     load_dotenv(ENV_PATH)
 
 # Максимальная прибыль в процентах (для фильтрации ошибок)
-MAX_REASONABLE_PROFIT = 50
+# Если спред больше этого значения - скорее всего ошибка в данных
+MAX_REASONABLE_SPREAD = 10.0  # 10% - максимальный реалистичный спред
 
 START_AMOUNT = float(os.getenv("START_AMOUNT", 100.0))
 MIN_SPREAD = float(os.getenv("MIN_SPREAD", 0.5))
 SHOW_TOP = int(os.getenv("SHOW_TOP", 10))
 
 # ============================================================================
-# ОПТИМИЗИРОВАННЫЕ НАСТРОЙКИ ДЛЯ BESTCHANGE API
+# ФИЛЬТРАЦИЯ МОНЕТ
 # ============================================================================
-# Уменьшаем количество одновременных запросов с 10 до 2
+
+# ЧЁРНЫЙ СПИСОК - монеты, которые нужно ИСКЛЮЧИТЬ из анализа
+# Добавляй сюда проблемные монеты (делистинг, нет переводов, заморожены и т.д.)
+BLACKLIST_COINS = {
+    'XEM',      # NEM - проблемы с переводами
+    'LUNA',     # Terra Classic - делистинг на многих биржах
+    'UST',      # TerraUSD - обвалилась
+    'FTT',      # FTX Token - делистинг
+    'BUSD',     # Binance USD - прекращён выпуск
+    'TUSD',     # TrueUSD - проблемы на некоторых биржах
+    'PAX',      # Paxos - ограничения
+    'USDC',     # Часто заморожен на переводах между биржами
+    # Добавляй сюда свои монеты
+}
+
+# БЕЛЫЙ СПИСОК - работать ТОЛЬКО с этими монетами (если не пустой)
+# Если список пустой - используются все монеты кроме чёрного списка
+# Если заполнен - работает ТОЛЬКО с этими монетами
+WHITELIST_COINS = {
+    # Популярные и ликвидные монеты (раскомментируй если хочешь использовать только их)
+    # 'BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'SOL', 'TRX', 'MATIC', 'DOT',
+    # 'LTC', 'SHIB', 'AVAX', 'UNI', 'LINK', 'ATOM', 'XLM', 'ETC', 'BCH', 'APT'
+}
+
+# Режим работы фильтра:
+# - True: используется БЕЛЫЙ список (если он заполнен), иначе ВСЕ монеты минус чёрный список
+# - False: отключить фильтрацию полностью (не рекомендуется)
+ENABLE_COIN_FILTER = True
+
+# ============================================================================
+# ОПТИМИЗИРОВАННЫЕ НАСТРОЙКИ ДЛЯ API
+# ============================================================================
 MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 2))
-
-# Увеличиваем задержку между запросами с 0.1 до 0.8 секунд
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", 0.8))
-
-# Размер пакета для batch загрузки (уменьшено с 100 до 50)
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", 50))
-
-# Количество повторных попыток при ошибке
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
-
-# Задержка при повторной попытке (в секундах)
 RETRY_DELAY = float(os.getenv("RETRY_DELAY", 2.0))
-
-# Таймаут для запросов (увеличен с 15 до 30 секунд)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 30))
 
 # ============================================================================
@@ -51,11 +73,8 @@ BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 
 # ============================================================================
-# BESTCHANGE API SETTINGS
+# DIRECTORIES
 # ============================================================================
-BESTCHANGE_API_KEY = os.getenv("BESTCHANGE_API_KEY", "")
-BESTCHANGE_BASE_URL = os.getenv("BESTCHANGE_BASE_URL", "https://bestchange.app")
-
 RESULTS_DIR = BASE_DIR / "results"
 LOGS_DIR = BASE_DIR / "logs"
 RESULTS_DIR.mkdir(exist_ok=True)
@@ -68,6 +87,9 @@ if DEBUG:
     print(f"START_AMOUNT = {START_AMOUNT}")
     print(f"MIN_SPREAD = {MIN_SPREAD}")
     print(f"SHOW_TOP = {SHOW_TOP}")
+    print(f"ENABLE_COIN_FILTER = {ENABLE_COIN_FILTER}")
+    print(f"BLACKLIST_COINS = {len(BLACKLIST_COINS)} монет")
+    print(f"WHITELIST_COINS = {len(WHITELIST_COINS)} монет")
     print(f"MAX_CONCURRENT_REQUESTS = {MAX_CONCURRENT_REQUESTS}")
     print(f"REQUEST_DELAY = {REQUEST_DELAY}")
     print(f"BATCH_SIZE = {BATCH_SIZE}")
@@ -76,8 +98,6 @@ if DEBUG:
     print(f"REQUEST_TIMEOUT = {REQUEST_TIMEOUT}")
     print(f"BYBIT_API_URL = {BYBIT_API_URL}")
     print(f"BINANCE_API_URL = {BINANCE_API_URL}")
-    print(f"BESTCHANGE_API_KEY = {'***' if BESTCHANGE_API_KEY else 'NOT SET'}")
-    print(f"BESTCHANGE_BASE_URL = {BESTCHANGE_BASE_URL}")
     print(f"RESULTS_DIR = {RESULTS_DIR}")
     print(f"LOGS_DIR = {LOGS_DIR}")
     print("===========================\n")

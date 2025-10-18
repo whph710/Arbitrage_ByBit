@@ -4,26 +4,23 @@ from datetime import datetime
 
 
 class ArbitrageAnalyzerAsync:
-    """Анализатор арбитражных возможностей с поддержкой Bybit, Binance и BestChange"""
+    """Анализатор арбитражных возможностей для Bybit и Binance"""
 
-    def __init__(self, bybit_client, binance_client, bestchange_client):
+    def __init__(self, bybit_client, binance_client):
         self.bybit = bybit_client
         self.binance = binance_client
-        self.bestchange = bestchange_client
 
-    async def find_circular_opportunities(
+    async def find_arbitrage_opportunities(
             self,
             start_amount: float = 100.0,
-            min_spread: float = 0.5,
-            top_count: int = 10
+            min_spread: float = 0.3,
+            top_count: int = 20
     ) -> List[Dict]:
         """
-        Ищет круговые арбитражные возможности по схемам:
-        1. Bybit → BestChange → Bybit (USDT → CoinA → CoinB → USDT)
-        2. Binance → BestChange → Binance (USDT → CoinA → CoinB → USDT)
-        3. Bybit → BestChange → Binance (USDT → CoinA → CoinB → USDT)
-        4. Binance → BestChange → Bybit (USDT → CoinA → CoinB → USDT)
-        5. Bybit → Binance (прямая связка) (USDT → Coin → USDT)
+        Ищет все арбитражные возможности:
+        1. Прямой арбитраж между биржами (A→B, B→A)
+        2. Треугольный на одной бирже (A: USDT→X→Y→USDT)
+        3. Треугольный кросс-биржевой (A: USDT→X, B: X→Y→USDT)
         """
 
         print(f"\n[Analyzer] 🔍 Начало поиска арбитражных возможностей")
@@ -31,236 +28,69 @@ class ArbitrageAnalyzerAsync:
 
         opportunities = []
 
-        # Собираем все возможности из разных схем
-        opportunities.extend(await self._find_exchange_bestchange_exchange(
-            start_amount, min_spread, "Bybit", self.bybit.usdt_pairs, self.bybit.usdt_pairs
-        ))
+        # 1. Прямой арбитраж между биржами
+        print("\n[Analyzer] 📊 Поиск прямого арбитража Bybit ↔ Binance...")
+        direct_opps = await self._find_direct_arbitrage(start_amount, min_spread)
+        opportunities.extend(direct_opps)
+        print(f"[Analyzer]   ✓ Найдено возможностей: {len(direct_opps)}")
 
-        opportunities.extend(await self._find_exchange_bestchange_exchange(
-            start_amount, min_spread, "Binance", self.binance.usdt_pairs, self.binance.usdt_pairs
-        ))
+        # 2. Треугольный арбитраж на Bybit
+        print("\n[Analyzer] 🔺 Поиск треугольного арбитража на Bybit...")
+        bybit_tri = await self._find_triangular_single_exchange(
+            start_amount, min_spread, "Bybit", self.bybit.usdt_pairs
+        )
+        opportunities.extend(bybit_tri)
+        print(f"[Analyzer]   ✓ Найдено возможностей: {len(bybit_tri)}")
 
-        opportunities.extend(await self._find_cross_exchange_bestchange(
-            start_amount, min_spread, "Bybit", "Binance", self.bybit.usdt_pairs, self.binance.usdt_pairs
-        ))
+        # 3. Треугольный арбитраж на Binance
+        print("\n[Analyzer] 🔺 Поиск треугольного арбитража на Binance...")
+        binance_tri = await self._find_triangular_single_exchange(
+            start_amount, min_spread, "Binance", self.binance.usdt_pairs
+        )
+        opportunities.extend(binance_tri)
+        print(f"[Analyzer]   ✓ Найдено возможностей: {len(binance_tri)}")
 
-        opportunities.extend(await self._find_cross_exchange_bestchange(
-            start_amount, min_spread, "Binance", "Bybit", self.binance.usdt_pairs, self.bybit.usdt_pairs
-        ))
+        # 4. Треугольный кросс-биржевой (Bybit → Binance)
+        print("\n[Analyzer] 🔀 Поиск кросс-биржевого треугольного арбитража Bybit → Binance...")
+        cross_bb = await self._find_triangular_cross_exchange(
+            start_amount, min_spread, "Bybit", "Binance",
+            self.bybit.usdt_pairs, self.binance.usdt_pairs
+        )
+        opportunities.extend(cross_bb)
+        print(f"[Analyzer]   ✓ Найдено возможностей: {len(cross_bb)}")
 
-        opportunities.extend(await self._find_direct_exchange_arbitrage(
-            start_amount, min_spread
-        ))
+        # 5. Треугольный кросс-биржевой (Binance → Bybit)
+        print("\n[Analyzer] 🔀 Поиск кросс-биржевого треугольного арбитража Binance → Bybit...")
+        cross_ab = await self._find_triangular_cross_exchange(
+            start_amount, min_spread, "Binance", "Bybit",
+            self.binance.usdt_pairs, self.bybit.usdt_pairs
+        )
+        opportunities.extend(cross_ab)
+        print(f"[Analyzer]   ✓ Найдено возможностей: {len(cross_ab)}")
 
-        # Сортируем и выводим результаты
+        # Сортируем по спреду
         opportunities.sort(key=lambda x: x['spread'], reverse=True)
-        top_opportunities = opportunities[:top_count]
+
+        # Ограничиваем топ
+        if top_count:
+            top_opportunities = opportunities[:top_count]
+        else:
+            top_opportunities = opportunities
 
         self._print_results(top_opportunities, min_spread, start_amount)
 
         return top_opportunities
 
-    async def _find_exchange_bestchange_exchange(
-            self,
-            start_amount: float,
-            min_spread: float,
-            exchange_name: str,
-            buy_prices: Dict[str, float],
-            sell_prices: Dict[str, float]
-    ) -> List[Dict]:
-        """
-        Схема: Exchange → BestChange → Exchange
-        Например: Bybit (USDT→CoinA) → BestChange (CoinA→CoinB) → Bybit (CoinB→USDT)
-        """
-
-        print(f"\n[Analyzer] 🔄 Анализ схемы: {exchange_name} → BestChange → {exchange_name}")
-
-        opportunities = []
-        rates = self.bestchange.rates
-
-        if not buy_prices or not rates:
-            return opportunities
-
-        common_coins = set(buy_prices.keys()) & set(rates.keys())
-        checked = 0
-
-        for coin_a in common_coins:
-            for coin_b in common_coins:
-                if coin_b == coin_a:
-                    continue
-
-                if coin_a not in rates or coin_b not in rates.get(coin_a, {}):
-                    continue
-
-                exch_list_ab = rates[coin_a][coin_b]
-                if not exch_list_ab:
-                    continue
-
-                try:
-                    checked += 1
-
-                    # Шаг 1: USDT → CoinA на бирже
-                    price_a = buy_prices[coin_a]
-                    if price_a <= 0:
-                        continue
-                    amount_a = start_amount / price_a
-
-                    # Шаг 2: CoinA → CoinB на BestChange
-                    bestchange_rate = exch_list_ab[0]['rate']
-                    if bestchange_rate <= 0:
-                        continue
-                    amount_b = amount_a / bestchange_rate
-
-                    # Шаг 3: CoinB → USDT на бирже
-                    if coin_b not in sell_prices:
-                        continue
-                    price_b = sell_prices[coin_b]
-                    if price_b <= 0:
-                        continue
-
-                    final_usdt = amount_b * price_b
-                    spread = ((final_usdt - start_amount) / start_amount) * 100
-
-                    if spread < min_spread:
-                        continue
-
-                    opportunities.append({
-                        'path': f"USDT → {coin_a} → {coin_b} → USDT",
-                        'scheme': f"{exchange_name} → BestChange → {exchange_name}",
-                        'coins': [coin_a, coin_b],
-                        'initial': start_amount,
-                        'final': final_usdt,
-                        'profit': final_usdt - start_amount,
-                        'spread': spread,
-                        'steps': [
-                            f"1. [{exchange_name}] Купить {amount_a:.8f} {coin_a} за {start_amount:.2f} USDT (цена: ${price_a:.8f})",
-                            f"2. [BestChange] Обменять {amount_a:.8f} {coin_a} → {amount_b:.8f} {coin_b}",
-                            f"   Курс: {bestchange_rate:.6f}, Обменник: {exch_list_ab[0]['exchanger']}",
-                            f"3. [{exchange_name}] Продать {amount_b:.8f} {coin_b} за {final_usdt:.2f} USDT (цена: ${price_b:.8f})"
-                        ],
-                        'debug': {
-                            'buy_exchange': exchange_name,
-                            'sell_exchange': exchange_name,
-                            'buy_price_a': price_a,
-                            'sell_price_b': price_b,
-                            'bestchange_rate': bestchange_rate,
-                            'exchanger': exch_list_ab[0]['exchanger'],
-                            'reserve': exch_list_ab[0].get('reserve', 0)
-                        }
-                    })
-
-                except (KeyError, ZeroDivisionError, TypeError):
-                    continue
-
-        print(f"[Analyzer]   Проверено путей: {checked}, найдено возможностей: {len(opportunities)}")
-        return opportunities
-
-    async def _find_cross_exchange_bestchange(
-            self,
-            start_amount: float,
-            min_spread: float,
-            buy_exchange: str,
-            sell_exchange: str,
-            buy_prices: Dict[str, float],
-            sell_prices: Dict[str, float]
-    ) -> List[Dict]:
-        """
-        Схема: Exchange1 → BestChange → Exchange2
-        Например: Bybit (USDT→CoinA) → BestChange (CoinA→CoinB) → Binance (CoinB→USDT)
-        """
-
-        print(f"\n[Analyzer] 🔄 Анализ схемы: {buy_exchange} → BestChange → {sell_exchange}")
-
-        opportunities = []
-        rates = self.bestchange.rates
-
-        if not buy_prices or not sell_prices or not rates:
-            return opportunities
-
-        common_buy = set(buy_prices.keys()) & set(rates.keys())
-        checked = 0
-
-        for coin_a in common_buy:
-            for coin_b in set(sell_prices.keys()):
-                if coin_b == coin_a:
-                    continue
-
-                if coin_a not in rates or coin_b not in rates.get(coin_a, {}):
-                    continue
-
-                exch_list_ab = rates[coin_a][coin_b]
-                if not exch_list_ab:
-                    continue
-
-                try:
-                    checked += 1
-
-                    # Шаг 1: USDT → CoinA на первой бирже
-                    price_a = buy_prices[coin_a]
-                    if price_a <= 0:
-                        continue
-                    amount_a = start_amount / price_a
-
-                    # Шаг 2: CoinA → CoinB на BestChange
-                    bestchange_rate = exch_list_ab[0]['rate']
-                    if bestchange_rate <= 0:
-                        continue
-                    amount_b = amount_a / bestchange_rate
-
-                    # Шаг 3: CoinB → USDT на второй бирже
-                    price_b = sell_prices[coin_b]
-                    if price_b <= 0:
-                        continue
-
-                    final_usdt = amount_b * price_b
-                    spread = ((final_usdt - start_amount) / start_amount) * 100
-
-                    if spread < min_spread:
-                        continue
-
-                    opportunities.append({
-                        'path': f"USDT → {coin_a} → {coin_b} → USDT",
-                        'scheme': f"{buy_exchange} → BestChange → {sell_exchange}",
-                        'coins': [coin_a, coin_b],
-                        'initial': start_amount,
-                        'final': final_usdt,
-                        'profit': final_usdt - start_amount,
-                        'spread': spread,
-                        'steps': [
-                            f"1. [{buy_exchange}] Купить {amount_a:.8f} {coin_a} за {start_amount:.2f} USDT (цена: ${price_a:.8f})",
-                            f"2. [BestChange] Обменять {amount_a:.8f} {coin_a} → {amount_b:.8f} {coin_b}",
-                            f"   Курс: {bestchange_rate:.6f}, Обменник: {exch_list_ab[0]['exchanger']}",
-                            f"3. [{sell_exchange}] Продать {amount_b:.8f} {coin_b} за {final_usdt:.2f} USDT (цена: ${price_b:.8f})"
-                        ],
-                        'debug': {
-                            'buy_exchange': buy_exchange,
-                            'sell_exchange': sell_exchange,
-                            'buy_price_a': price_a,
-                            'sell_price_b': price_b,
-                            'bestchange_rate': bestchange_rate,
-                            'exchanger': exch_list_ab[0]['exchanger'],
-                            'reserve': exch_list_ab[0].get('reserve', 0)
-                        }
-                    })
-
-                except (KeyError, ZeroDivisionError, TypeError):
-                    continue
-
-        print(f"[Analyzer]   Проверено путей: {checked}, найдено возможностей: {len(opportunities)}")
-        return opportunities
-
-    async def _find_direct_exchange_arbitrage(
+    async def _find_direct_arbitrage(
             self,
             start_amount: float,
             min_spread: float
     ) -> List[Dict]:
         """
-        Схема: Прямой арбитраж между биржами (оба направления)
-        Bybit → Binance И Binance → Bybit
+        Прямой арбитраж между биржами:
+        - Bybit → Binance
+        - Binance → Bybit
         """
-
-        print(f"\n[Analyzer] 🔄 Анализ схемы: Прямой арбитраж Bybit ↔ Binance")
-
         opportunities = []
 
         bybit_prices = self.bybit.usdt_pairs
@@ -270,80 +100,165 @@ class ArbitrageAnalyzerAsync:
             return opportunities
 
         common_coins = set(bybit_prices.keys()) & set(binance_prices.keys())
-        checked = 0
 
         for coin in common_coins:
             try:
-                checked += 1
-
                 bybit_price = bybit_prices[coin]
                 binance_price = binance_prices[coin]
 
                 if bybit_price <= 0 or binance_price <= 0:
                     continue
 
-                # Вариант 1: Покупка на Bybit, продажа на Binance
-                amount_coin_1 = start_amount / bybit_price
-                final_usdt_1 = amount_coin_1 * binance_price
-                spread_1 = ((final_usdt_1 - start_amount) / start_amount) * 100
+                # Вариант 1: Покупка на Bybit → Продажа на Binance
+                amount_coin = start_amount / bybit_price
+                final_usdt = amount_coin * binance_price
+                spread = ((final_usdt - start_amount) / start_amount) * 100
 
-                if spread_1 >= min_spread:
+                if spread >= min_spread:
                     opportunities.append({
+                        'type': 'direct',
                         'path': f"USDT → {coin} → USDT",
-                        'scheme': "Bybit → Binance (прямой арбитраж)",
+                        'scheme': "Bybit → Binance",
                         'coins': [coin],
                         'initial': start_amount,
-                        'final': final_usdt_1,
-                        'profit': final_usdt_1 - start_amount,
-                        'spread': spread_1,
-                        'steps': [
-                            f"1. [Bybit] Купить {amount_coin_1:.8f} {coin} за {start_amount:.2f} USDT (цена: ${bybit_price:.8f})",
-                            f"2. Перевод {coin} с Bybit на Binance",
-                            f"3. [Binance] Продать {amount_coin_1:.8f} {coin} за {final_usdt_1:.2f} USDT (цена: ${binance_price:.8f})"
-                        ],
-                        'debug': {
-                            'buy_exchange': 'Bybit',
-                            'sell_exchange': 'Binance',
-                            'buy_price': bybit_price,
-                            'sell_price': binance_price,
-                            'price_diff': binance_price - bybit_price,
-                            'price_diff_percent': ((binance_price - bybit_price) / bybit_price) * 100
-                        }
+                        'final': final_usdt,
+                        'profit': final_usdt - start_amount,
+                        'spread': spread
                     })
 
-                # Вариант 2: Покупка на Binance, продажа на Bybit
-                amount_coin_2 = start_amount / binance_price
-                final_usdt_2 = amount_coin_2 * bybit_price
-                spread_2 = ((final_usdt_2 - start_amount) / start_amount) * 100
+                # Вариант 2: Покупка на Binance → Продажа на Bybit
+                amount_coin = start_amount / binance_price
+                final_usdt = amount_coin * bybit_price
+                spread = ((final_usdt - start_amount) / start_amount) * 100
 
-                if spread_2 >= min_spread:
+                if spread >= min_spread:
                     opportunities.append({
+                        'type': 'direct',
                         'path': f"USDT → {coin} → USDT",
-                        'scheme': "Binance → Bybit (прямой арбитраж)",
+                        'scheme': "Binance → Bybit",
                         'coins': [coin],
                         'initial': start_amount,
-                        'final': final_usdt_2,
-                        'profit': final_usdt_2 - start_amount,
-                        'spread': spread_2,
-                        'steps': [
-                            f"1. [Binance] Купить {amount_coin_2:.8f} {coin} за {start_amount:.2f} USDT (цена: ${binance_price:.8f})",
-                            f"2. Перевод {coin} с Binance на Bybit",
-                            f"3. [Bybit] Продать {amount_coin_2:.8f} {coin} за {final_usdt_2:.2f} USDT (цена: ${bybit_price:.8f})"
-                        ],
-                        'debug': {
-                            'buy_exchange': 'Binance',
-                            'sell_exchange': 'Bybit',
-                            'buy_price': binance_price,
-                            'sell_price': bybit_price,
-                            'price_diff': bybit_price - binance_price,
-                            'price_diff_percent': ((bybit_price - binance_price) / binance_price) * 100
-                        }
+                        'final': final_usdt,
+                        'profit': final_usdt - start_amount,
+                        'spread': spread
                     })
 
             except (KeyError, ZeroDivisionError, TypeError):
                 continue
 
-        print(f"[Analyzer]   Проверено монет: {checked}, найдено возможностей: {len(opportunities)}")
+        return opportunities
+
+    async def _find_triangular_single_exchange(
+            self,
+            start_amount: float,
+            min_spread: float,
+            exchange_name: str,
+            usdt_pairs: Dict[str, float]
+    ) -> List[Dict]:
+        """
+        Треугольный арбитраж на одной бирже:
+        USDT → CoinA → CoinB → USDT
+        """
+        opportunities = []
+
+        exchange_client = self.bybit if exchange_name == "Bybit" else self.binance
+
+        coins = list(usdt_pairs.keys())
+        checked = 0
+
+        for i, coin_a in enumerate(coins):
+            for coin_b in coins[i + 1:]:
+                if coin_a == coin_b:
+                    continue
+
+                checked += 1
+
+                # Проверяем, есть ли пара CoinA/CoinB
+                if not exchange_client.has_trading_pair(coin_a, coin_b):
+                    continue
+
+                try:
+                    price_a_usdt = usdt_pairs[coin_a]
+                    price_b_usdt = usdt_pairs[coin_b]
+
+                    if price_a_usdt <= 0 or price_b_usdt <= 0:
+                        continue
+
+                    price_a_to_b = price_a_usdt / price_b_usdt
+
+                    # Путь 1: USDT → CoinA → CoinB → USDT
+                    amount_a = start_amount / price_a_usdt
+                    amount_b = amount_a * price_a_to_b
+                    final_usdt = amount_b * price_b_usdt
+                    spread = ((final_usdt - start_amount) / start_amount) * 100
+
+                    if spread >= min_spread:
+                        opportunities.append({
+                            'type': 'triangular_single',
+                            'scheme': exchange_name,
+                            'path': f"USDT → {coin_a} → {coin_b} → USDT",
+                            'spread': spread,
+                            'profit': final_usdt - start_amount
+                        })
+
+                except Exception:
+                    continue
+
+        return opportunities
+
+    async def _find_triangular_cross_exchange(
+            self,
+            start_amount: float,
+            min_spread: float,
+            exchange_1: str,
+            exchange_2: str,
+            prices_1: Dict[str, float],
+            prices_2: Dict[str, float]
+    ) -> List[Dict]:
+        """
+        Треугольный кросс-биржевой арбитраж:
+        Exchange1: USDT → CoinA
+        Exchange2: CoinA → CoinB → USDT
+        """
+        opportunities = []
+
+        exchange2_client = self.bybit if exchange_2 == "Bybit" else self.binance
+        common_coins = set(prices_1.keys()) & set(prices_2.keys())
+
+        for coin_a in common_coins:
+            for coin_b in prices_2.keys():
+                if coin_a == coin_b:
+                    continue
+
+                if not exchange2_client.has_trading_pair(coin_a, coin_b):
+                    continue
+
+                try:
+                    price_a_exch1 = prices_1[coin_a]
+                    price_a_exch2 = prices_2[coin_a]
+                    price_b_exch2 = prices_2[coin_b]
+
+                    if price_a_exch1 <= 0 or price_a_exch2 <= 0 or price_b_exch2 <= 0:
+                        continue
+
+                    amount_a = start_amount / price_a_exch1
+                    cross_rate = price_a_exch2 / price_b_exch2
+                    amount_b = amount_a * cross_rate
+                    final_usdt = amount_b * price_b_exch2
+                    spread = ((final_usdt - start_amount) / start_amount) * 100
+
+                    if spread >= min_spread:
+                        opportunities.append({
+                            'type': 'triangular_cross',
+                            'scheme': f"{exchange_1} → {exchange_2}",
+                            'path': f"USDT → {coin_a} → {coin_b} → USDT",
+                            'spread': spread,
+                            'profit': final_usdt - start_amount
+                        })
+
+                except Exception:
+                    continue
+
         return opportunities
 
     def _print_results(self, opportunities: List[Dict], min_spread: float, start_amount: float):
@@ -355,22 +270,7 @@ class ArbitrageAnalyzerAsync:
             print("=" * 100 + "\n")
 
             for idx, opp in enumerate(opportunities, 1):
-                print(f"#{idx} | Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
-                print(f"    Схема: {opp['scheme']}")
-                print(f"    Путь: {opp['path']}")
-                print(f"    Детали:")
-                for step in opp['steps']:
-                    print(f"       {step}")
-
-                if 'debug' in opp and 'reserve' in opp['debug']:
-                    reserve = opp['debug'].get('reserve', 0)
-                    if reserve > 0:
-                        print(f"    💰 Резерв обменника: ${reserve:.2f}")
-                print()
+                print(f"#{idx} | {opp['scheme']} | {opp['path']}")
+                print(f"   ➜ Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}\n")
         else:
-            print(f"\n❌ Арбитражных возможностей со спредом >= {min_spread}% не найдено")
-            print(f"\n💡 РЕКОМЕНДАЦИИ:")
-            print(f"   1. Уменьшите MIN_SPREAD в configs.py (попробуйте 0.1% или даже 0.01%)")
-            print(f"   2. Проверьте, что все API доступны и возвращают актуальные данные")
-            print(f"   3. Учтите комиссии бирж (~0.1-0.2%) и обменников (~0.5-2%)")
-            print(f"   4. Учтите комиссии за вывод и перевод между биржами")
+            print(f"\n❌ Арбитражных возможностей со спредом >= {min_spread}% не найдено.")

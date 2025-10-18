@@ -1,17 +1,17 @@
 import asyncio
 from datetime import datetime
 
-from configs import START_AMOUNT, MIN_SPREAD, SHOW_TOP
+from configs import (START_AMOUNT, MIN_SPREAD, SHOW_TOP,
+                     ENABLE_COIN_FILTER, BLACKLIST_COINS, WHITELIST_COINS)
 from bybit_handler import BybitClientAsync
 from binance_handler import BinanceClientAsync
-from results.bestchange_handler import BestChangeClientAsync
 from arbitrage_analyzer import ArbitrageAnalyzerAsync
 from results_saver import ResultsSaver
 
 
 async def main():
     print("=" * 100)
-    print("🚀 CRYPTO ARBITRAGE BOT v2.0 — MULTI-EXCHANGE MODE")
+    print("🚀 CRYPTO ARBITRAGE BOT v3.0 — DIRECT & TRIANGULAR ARBITRAGE")
     print("=" * 100)
 
     start_time = datetime.now()
@@ -20,11 +20,15 @@ async def main():
     print(f"📊 Минимальный спред: {MIN_SPREAD}%")
     print(f"🎯 Показывать топ: {SHOW_TOP} связок")
     print(f"\n🔍 Поддерживаемые схемы арбитража:")
-    print(f"   1. Bybit → BestChange → Bybit")
-    print(f"   2. Binance → BestChange → Binance")
-    print(f"   3. Bybit → BestChange → Binance")
-    print(f"   4. Binance → BestChange → Bybit")
-    print(f"   5. Bybit ↔ Binance (прямой арбитраж)\n")
+    print(f"   1. 🔄 Прямой арбитраж:")
+    print(f"      • Bybit → Binance")
+    print(f"      • Binance → Bybit")
+    print(f"   2. 🔺 Треугольный на одной бирже:")
+    print(f"      • Bybit: USDT → CoinA → CoinB → USDT")
+    print(f"      • Binance: USDT → CoinA → CoinB → USDT")
+    print(f"   3. 🔀 Треугольный кросс-биржевой:")
+    print(f"      • Bybit → Binance: USDT → CoinA (Bybit) → CoinB (Binance) → USDT")
+    print(f"      • Binance → Bybit: USDT → CoinA (Binance) → CoinB (Bybit) → USDT\n")
 
     # ───────────────────────────────────────────────────────────────
     # ШАГ 1: Загрузка данных с бирж
@@ -59,131 +63,94 @@ async def main():
             print(f"[Analysis]   Примеры: {exchanges_preview}{more_exchanges}")
 
         # ───────────────────────────────────────────────────────────────
-        # ШАГ 2: Инициализация BestChange
+        # ШАГ 2: Поиск арбитражных возможностей
         # ───────────────────────────────────────────────────────────────
         print("\n" + "=" * 100)
-        print("📊 ШАГ 2: ИНИЦИАЛИЗАЦИЯ BESTCHANGE API v2.0")
+        print("🔍 ШАГ 2: ПОИСК АРБИТРАЖНЫХ ВОЗМОЖНОСТЕЙ")
         print("=" * 100)
 
-        async with BestChangeClientAsync() as bc:
-            print("[BestChange] Загрузка валют...")
-            await bc.load_currencies()
-            print(f"[BestChange] ✓ Всего валют: {len(bc.currencies)}")
-            print(f"[BestChange] ✓ Криптовалют: {len(bc.crypto_currencies)}")
+        analyzer = ArbitrageAnalyzerAsync(bybit, binance)
+        opportunities = await analyzer.find_arbitrage_opportunities(
+            start_amount=START_AMOUNT,
+            min_spread=MIN_SPREAD,
+            top_count=SHOW_TOP
+        )
 
-            # Показываем примеры криптовалют
-            crypto_preview = ', '.join(sorted(list(bc.crypto_currencies.keys())[:20]))
-            more_crypto = f" и еще {len(bc.crypto_currencies) - 20}" if len(bc.crypto_currencies) > 20 else ""
-            print(f"[BestChange]   Примеры: {crypto_preview}{more_crypto}")
+        # ───────────────────────────────────────────────────────────────
+        # ШАГ 3: Сохранение результатов
+        # ───────────────────────────────────────────────────────────────
+        print("\n" + "=" * 100)
+        print("💾 ШАГ 3: СОХРАНЕНИЕ РЕЗУЛЬТАТОВ АНАЛИЗА")
+        print("=" * 100)
 
-            print("\n[BestChange] Загрузка обменников...")
-            await bc.load_exchangers()
-            print(f"[BestChange] ✓ Активных обменников: {len(bc.changers)}")
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
 
-            # Пересечение монет: (Bybit ∪ Binance) ∩ BestChange
-            all_exchange_coins = bybit.coins | binance.coins
-            common_with_bestchange = list(all_exchange_coins & set(bc.crypto_currencies.keys()))
+        saver = ResultsSaver()
+        saved_files = saver.save_opportunities(
+            opportunities=opportunities,
+            start_amount=START_AMOUNT,
+            min_spread=MIN_SPREAD,
+            execution_time=elapsed,
+            save_formats=['json', 'txt', 'csv', 'html']
+        )
 
-            print(f"\n[Analysis] ✓ Монет доступных на биржах: {len(all_exchange_coins)}")
-            print(f"[Analysis] ✓ Общих монет с BestChange: {len(common_with_bestchange)}")
+        print("\n📂 Файлы сохранены:")
+        for fmt, path in saved_files.items():
+            print(f"   • {fmt.upper()} → {path}")
 
-            if common_with_bestchange:
-                common_bc_preview = ', '.join(sorted(common_with_bestchange[:20]))
-                more_bc = f" и еще {len(common_with_bestchange) - 20}" if len(common_with_bestchange) > 20 else ""
-                print(f"[Analysis]   Общие монеты: {common_bc_preview}{more_bc}")
-
-            if not common_with_bestchange:
-                print("\n❌ Нет общих монет между биржами и BestChange. Проверьте данные.")
-                return
-
-            # ───────────────────────────────────────────────────────────────
-            # ШАГ 3: Загрузка курсов BestChange
-            # ───────────────────────────────────────────────────────────────
+        # ───────────────────────────────────────────────────────────────
+        # ШАГ 4: Финальная статистика
+        # ───────────────────────────────────────────────────────────────
+        if opportunities:
             print("\n" + "=" * 100)
-            print("📊 ШАГ 3: ЗАГРУЗКА КУРСОВ BESTCHANGE (BATCH MODE)")
-            print("=" * 100)
-            print(f"[BestChange] Загрузка курсов для {len(common_with_bestchange)} монет...")
-            print("[BestChange] Используется пакетная загрузка с оптимизированными задержками")
-
-            await bc.load_rates(common_with_bestchange)
-
-            # Подсчитываем статистику
-            total_directions = sum(len(pairs) for pairs in bc.rates.values())
-            print(f"\n[BestChange] ✓ Загружено направлений обмена: {total_directions}")
-            print(f"[BestChange] ✓ Валют с доступными курсами: {len(bc.rates)}")
-
-            # Статистика по схемам
-            bybit_bc_coins = list(bybit.coins & set(bc.crypto_currencies.keys()))
-            binance_bc_coins = list(binance.coins & set(bc.crypto_currencies.keys()))
-
-            print(f"\n[Analysis] 📊 СТАТИСТИКА ПО ДОСТУПНЫМ СХЕМАМ:")
-            print(f"   ├─ Bybit + BestChange: {len(bybit_bc_coins)} монет")
-            print(f"   ├─ Binance + BestChange: {len(binance_bc_coins)} монет")
-            print(f"   ├─ Bybit ↔ Binance: {len(common_exchanges)} монет")
-            print(
-                f"   └─ Все три источника: {len(bybit.coins & binance.coins & set(bc.crypto_currencies.keys()))} монет")
-
-            # ───────────────────────────────────────────────────────────────
-            # ШАГ 4: Поиск арбитражных возможностей
-            # ───────────────────────────────────────────────────────────────
-            print("\n" + "=" * 100)
-            print("🔍 ШАГ 4: ПОИСК АРБИТРАЖНЫХ ВОЗМОЖНОСТЕЙ (МУЛЬТИ-СХЕМА)")
+            print("📈 ФИНАЛЬНАЯ СТАТИСТИКА")
             print("=" * 100)
 
-            analyzer = ArbitrageAnalyzerAsync(bybit, binance, bc)
-            opportunities = await analyzer.find_circular_opportunities(
-                start_amount=START_AMOUNT,
-                min_spread=MIN_SPREAD,
-                top_count=None
-            )
+            types_stats = {}
+            for opp in opportunities:
+                opp_type = opp.get('type', 'unknown')
+                if opp_type not in types_stats:
+                    types_stats[opp_type] = {'count': 0, 'max_spread': 0, 'total_profit': 0}
+                types_stats[opp_type]['count'] += 1
+                types_stats[opp_type]['max_spread'] = max(types_stats[opp_type]['max_spread'], opp['spread'])
+                types_stats[opp_type]['total_profit'] += opp['profit']
 
-            # ───────────────────────────────────────────────────────────────
-            # ШАГ 5: Сохранение результатов
-            # ───────────────────────────────────────────────────────────────
+            type_names = {
+                'direct': '🔄 Прямой арбитраж',
+                'triangular_single': '🔺 Треугольный (одна биржа)',
+                'triangular_cross': '🔀 Треугольный (кросс-биржевой)'
+            }
+
+            print("\nРаспределение по типам:")
+            for opp_type, stats in sorted(types_stats.items(), key=lambda x: x[1]['max_spread'], reverse=True):
+                type_name = type_names.get(opp_type, opp_type)
+                print(f"\n{type_name}:")
+                print(f"  • Найдено: {stats['count']} возможностей")
+                print(f"  • Макс. спред: {stats['max_spread']:.4f}%")
+                print(f"  • Суммарная прибыль: ${stats['total_profit']:.2f}")
+
+            # Топ-5 самых прибыльных
             print("\n" + "=" * 100)
-            print("💾 ШАГ 5: СОХРАНЕНИЕ РЕЗУЛЬТАТОВ АНАЛИЗА")
-            print("=" * 100)
+            print("🏆 ТОП-5 САМЫХ ПРИБЫЛЬНЫХ ВОЗМОЖНОСТЕЙ:")
+            print("=" * 100 + "\n")
 
-            end_time = datetime.now()
-            elapsed = (end_time - start_time).total_seconds()
+            for idx, opp in enumerate(opportunities[:5], 1):
+                print(f"#{idx} | {opp['scheme']}")
+                print(f"     Путь: {opp['path']}")
+                print(f"     Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+                print()
 
-            saver = ResultsSaver()
-            saved_files = saver.save_opportunities(
-                opportunities=opportunities,
-                start_amount=START_AMOUNT,
-                min_spread=MIN_SPREAD,
-                execution_time=elapsed,
-                save_formats=['json', 'txt', 'csv', 'html']  # можешь убрать ненужные форматы
-            )
+        print("\n" + "=" * 100)
+        print(f"✅ АНАЛИЗ ЗАВЕРШЁН ЗА {elapsed:.2f} СЕКУНД")
+        print("=" * 100)
 
-            print("\n📂 Файлы сохранены:")
-            for fmt, path in saved_files.items():
-                print(f"   • {fmt.upper()} → {path}")
-
-            # ───────────────────────────────────────────────────────────────
-            # ШАГ 6: Статистика по схемам
-            # ───────────────────────────────────────────────────────────────
-            if opportunities:
-                print("\n" + "=" * 100)
-                print("📈 СТАТИСТИКА ПО НАЙДЕННЫМ ВОЗМОЖНОСТЯМ")
-                print("=" * 100)
-
-                schemes_stats = {}
-                for opp in opportunities:
-                    scheme = opp['scheme']
-                    if scheme not in schemes_stats:
-                        schemes_stats[scheme] = {'count': 0, 'max_spread': 0, 'total_profit': 0}
-                    schemes_stats[scheme]['count'] += 1
-                    schemes_stats[scheme]['max_spread'] = max(schemes_stats[scheme]['max_spread'], opp['spread'])
-                    schemes_stats[scheme]['total_profit'] += opp['profit']
-
-                print("\nРаспределение по схемам:")
-                for scheme, stats in sorted(schemes_stats.items(), key=lambda x: x[1]['max_spread'], reverse=True):
-                    print(f"   • {scheme}")
-                    print(f"     Найдено: {stats['count']} возможностей")
-                    print(f"     Макс. спред: {stats['max_spread']:.4f}%")
-                    print(f"     Общая потенциальная прибыль: ${stats['total_profit']:.2f}")
-                    print()
+        print("\n⚠️  ВАЖНЫЕ ЗАМЕЧАНИЯ:")
+        print("   • Указанные спреды НЕ учитывают комиссии бирж (~0.1-0.2% за сделку)")
+        print("   • Переводы между биржами требуют времени и комиссий")
+        print("   • Проскальзывание цены может съесть часть прибыли")
+        print("   • Треугольный арбитраж требует наличия реальных торговых пар")
+        print("   • Всегда проверяйте актуальность данных перед сделкой!")
 
 
 if __name__ == "__main__":
