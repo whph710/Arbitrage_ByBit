@@ -1,17 +1,16 @@
 import asyncio
 from datetime import datetime
 
-from configs import (START_AMOUNT, MIN_SPREAD, SHOW_TOP,
-                     ENABLE_COIN_FILTER, BLACKLIST_COINS, WHITELIST_COINS)
+from configs import (START_AMOUNT, MIN_SPREAD, SHOW_TOP, CHANGENOW_API_KEY)
 from bybit_handler import BybitClientAsync
-from binance_handler import BinanceClientAsync
-from arbitrage_analyzer import ArbitrageAnalyzerAsync
+from changenow_handler import ChangeNowClientAsync
+from exchange_arbitrage_analyzer import ExchangeArbitrageAnalyzer
 from results_saver import ResultsSaver
 
 
 async def main():
     print("=" * 100)
-    print("🚀 CRYPTO ARBITRAGE BOT v3.0 — DIRECT & TRIANGULAR ARBITRAGE")
+    print("🚀 CRYPTO ARBITRAGE BOT v4.0 — ОБМЕННИКИ")
     print("=" * 100)
 
     start_time = datetime.now()
@@ -19,143 +18,184 @@ async def main():
     print(f"💰 Начальная сумма: ${START_AMOUNT}")
     print(f"📊 Минимальный спред: {MIN_SPREAD}%")
     print(f"🎯 Показывать топ: {SHOW_TOP} связок")
-    print(f"\n🔍 Поддерживаемые схемы арбитража:")
-    print(f"   1. 🔄 Прямой арбитраж:")
-    print(f"      • Bybit → Binance")
-    print(f"      • Binance → Bybit")
-    print(f"   2. 🔺 Треугольный на одной бирже:")
-    print(f"      • Bybit: USDT → CoinA → CoinB → USDT")
-    print(f"      • Binance: USDT → CoinA → CoinB → USDT")
-    print(f"   3. 🔀 Треугольный кросс-биржевой:")
-    print(f"      • Bybit → Binance: USDT → CoinA (Bybit) → CoinB (Binance) → USDT")
-    print(f"      • Binance → Bybit: USDT → CoinA (Binance) → CoinB (Bybit) → USDT\n")
+    print(f"\n🔍 Схема арбитража:")
+    print(f"   USDT (Bybit) → CoinA (Bybit) → Обменник → CoinB (Bybit) → USDT (Bybit)\n")
 
     # ───────────────────────────────────────────────────────────────
-    # ШАГ 1: Загрузка данных с бирж
+    # ШАГ 1: Загрузка данных с Bybit
     # ───────────────────────────────────────────────────────────────
     print("=" * 100)
-    print("📊 ШАГ 1: ЗАГРУЗКА ДАННЫХ С БИРЖ")
+    print("📊 ШАГ 1: ЗАГРУЗКА ДАННЫХ С BYBIT")
     print("=" * 100)
 
-    async with BybitClientAsync() as bybit, BinanceClientAsync() as binance:
-        # Загружаем данные параллельно
-        await asyncio.gather(
-            bybit.load_usdt_pairs(),
-            binance.load_usdt_pairs()
-        )
+    async with BybitClientAsync() as bybit:
+        await bybit.load_usdt_pairs()
 
         print(f"\n[Bybit] ✓ Загружено {len(bybit.usdt_pairs)} торговых пар USDT")
-        bybit_preview = ', '.join(sorted(list(bybit.coins)[:15]))
-        more_bybit = f" и еще {len(bybit.coins) - 15}" if len(bybit.coins) > 15 else ""
+        bybit_preview = ', '.join(sorted(list(bybit.coins)[:20]))
+        more_bybit = f" и еще {len(bybit.coins) - 20}" if len(bybit.coins) > 20 else ""
         print(f"[Bybit] ✓ Найденные монеты ({len(bybit.coins)}): {bybit_preview}{more_bybit}")
 
-        print(f"\n[Binance] ✓ Загружено {len(binance.usdt_pairs)} торговых пар USDT")
-        binance_preview = ', '.join(sorted(list(binance.coins)[:15]))
-        more_binance = f" и еще {len(binance.coins) - 15}" if len(binance.coins) > 15 else ""
-        print(f"[Binance] ✓ Найденные монеты ({len(binance.coins)}): {binance_preview}{more_binance}")
-
-        # Пересечение монет между биржами
-        common_exchanges = bybit.coins & binance.coins
-        print(f"\n[Analysis] ✓ Общих монет между Bybit и Binance: {len(common_exchanges)}")
-        if common_exchanges:
-            exchanges_preview = ', '.join(sorted(list(common_exchanges)[:20]))
-            more_exchanges = f" и еще {len(common_exchanges) - 20}" if len(common_exchanges) > 20 else ""
-            print(f"[Analysis]   Примеры: {exchanges_preview}{more_exchanges}")
-
         # ───────────────────────────────────────────────────────────────
-        # ШАГ 2: Поиск арбитражных возможностей
+        # ШАГ 2: Загрузка данных с обменника
         # ───────────────────────────────────────────────────────────────
         print("\n" + "=" * 100)
-        print("🔍 ШАГ 2: ПОИСК АРБИТРАЖНЫХ ВОЗМОЖНОСТЕЙ")
+        print("📊 ШАГ 2: ЗАГРУЗКА ДАННЫХ С CHANGENOW")
         print("=" * 100)
 
-        analyzer = ArbitrageAnalyzerAsync(bybit, binance)
-        opportunities = await analyzer.find_arbitrage_opportunities(
-            start_amount=START_AMOUNT,
-            min_spread=MIN_SPREAD,
-            top_count=SHOW_TOP
-        )
+        async with ChangeNowClientAsync(api_key=CHANGENOW_API_KEY) as changenow:
+            await changenow.load_available_currencies()
 
-        # ───────────────────────────────────────────────────────────────
-        # ШАГ 3: Сохранение результатов
-        # ───────────────────────────────────────────────────────────────
-        print("\n" + "=" * 100)
-        print("💾 ШАГ 3: СОХРАНЕНИЕ РЕЗУЛЬТАТОВ АНАЛИЗА")
-        print("=" * 100)
+            print(f"\n[ChangeNOW] ✓ Загружено {len(changenow.available_currencies)} валют")
 
-        end_time = datetime.now()
-        elapsed = (end_time - start_time).total_seconds()
+            # Находим общие монеты
+            common_coins = changenow.get_common_currencies(bybit.coins)
 
-        saver = ResultsSaver()
-        saved_files = saver.save_opportunities(
-            opportunities=opportunities,
-            start_amount=START_AMOUNT,
-            min_spread=MIN_SPREAD,
-            execution_time=elapsed,
-            save_formats=['json', 'txt', 'csv', 'html']
-        )
+            if not common_coins:
+                print("\n❌ Нет общих монет между Bybit и ChangeNOW. Анализ невозможен.")
+                return
 
-        print("\n📂 Файлы сохранены:")
-        for fmt, path in saved_files.items():
-            print(f"   • {fmt.upper()} → {path}")
-
-        # ───────────────────────────────────────────────────────────────
-        # ШАГ 4: Финальная статистика
-        # ───────────────────────────────────────────────────────────────
-        if opportunities:
+            # ───────────────────────────────────────────────────────────────
+            # ШАГ 3: Поиск арбитражных связок
+            # ───────────────────────────────────────────────────────────────
             print("\n" + "=" * 100)
-            print("📈 ФИНАЛЬНАЯ СТАТИСТИКА")
+            print("🔍 ШАГ 3: ПОИСК АРБИТРАЖНЫХ СВЯЗОК")
             print("=" * 100)
 
-            types_stats = {}
-            for opp in opportunities:
-                opp_type = opp.get('type', 'unknown')
-                if opp_type not in types_stats:
-                    types_stats[opp_type] = {'count': 0, 'max_spread': 0, 'total_profit': 0}
-                types_stats[opp_type]['count'] += 1
-                types_stats[opp_type]['max_spread'] = max(types_stats[opp_type]['max_spread'], opp['spread'])
-                types_stats[opp_type]['total_profit'] += opp['profit']
+            analyzer = ExchangeArbitrageAnalyzer(bybit, changenow)
 
-            type_names = {
-                'direct': '🔄 Прямой арбитраж',
-                'triangular_single': '🔺 Треугольный (одна биржа)',
-                'triangular_cross': '🔀 Треугольный (кросс-биржевой)'
-            }
+            # Можно ограничить количество проверяемых пар для ускорения
+            # Рекомендуется начать с 50-100 пар
+            opportunities = await analyzer.find_arbitrage_opportunities(
+                start_amount=START_AMOUNT,
+                min_spread=MIN_SPREAD,
+                top_count=SHOW_TOP,
+                max_pairs_to_check=100  # Можно увеличить до 200-300
+            )
 
-            print("\nРаспределение по типам:")
-            for opp_type, stats in sorted(types_stats.items(), key=lambda x: x[1]['max_spread'], reverse=True):
-                type_name = type_names.get(opp_type, opp_type)
-                print(f"\n{type_name}:")
-                print(f"  • Найдено: {stats['count']} возможностей")
-                print(f"  • Макс. спред: {stats['max_spread']:.4f}%")
-                print(f"  • Суммарная прибыль: ${stats['total_profit']:.2f}")
-
-            # Топ-5 самых прибыльных
+            # ───────────────────────────────────────────────────────────────
+            # ШАГ 4: Сохранение результатов
+            # ───────────────────────────────────────────────────────────────
             print("\n" + "=" * 100)
-            print("🏆 ТОП-5 САМЫХ ПРИБЫЛЬНЫХ ВОЗМОЖНОСТЕЙ:")
-            print("=" * 100 + "\n")
+            print("💾 ШАГ 4: СОХРАНЕНИЕ РЕЗУЛЬТАТОВ АНАЛИЗА")
+            print("=" * 100)
 
-            for idx, opp in enumerate(opportunities[:5], 1):
-                print(f"#{idx} | {opp['scheme']}")
-                print(f"     Путь: {opp['path']}")
-                print(f"     Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
-                print()
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+
+            saver = ResultsSaver()
+            saved_files = saver.save_opportunities(
+                opportunities=opportunities,
+                start_amount=START_AMOUNT,
+                min_spread=MIN_SPREAD,
+                execution_time=elapsed,
+                save_formats=['json', 'txt', 'csv', 'html']
+            )
+
+            print("\n📂 Файлы сохранены:")
+            for fmt, path in saved_files.items():
+                print(f"   • {fmt.upper()} → {path}")
+
+            # ───────────────────────────────────────────────────────────────
+            # ШАГ 5: Финальная статистика
+            # ───────────────────────────────────────────────────────────────
+            if opportunities:
+                print("\n" + "=" * 100)
+                print("📈 ФИНАЛЬНАЯ СТАТИСТИКА")
+                print("=" * 100)
+
+                # Статистика по монетам
+                coin_stats = {}
+                for opp in opportunities:
+                    for coin in opp['coins']:
+                        if coin not in coin_stats:
+                            coin_stats[coin] = {'count': 0, 'max_spread': 0, 'total_profit': 0}
+                        coin_stats[coin]['count'] += 1
+                        coin_stats[coin]['max_spread'] = max(coin_stats[coin]['max_spread'], opp['spread'])
+                        coin_stats[coin]['total_profit'] += opp['profit']
+
+                print(f"\n📊 Всего связок найдено: {len(opportunities)}")
+                print(f"💰 Общая потенциальная прибыль: ${sum(opp['profit'] for opp in opportunities):.2f}")
+                print(f"📈 Средний спред: {sum(opp['spread'] for opp in opportunities) / len(opportunities):.4f}%")
+                print(f"🏆 Максимальный спред: {opportunities[0]['spread']:.4f}%")
+
+                # Топ-5 самых популярных монет
+                print("\n🔥 ТОП-5 самых популярных монет в связках:")
+                sorted_coins = sorted(coin_stats.items(), key=lambda x: x[1]['count'], reverse=True)[:5]
+                for idx, (coin, stats) in enumerate(sorted_coins, 1):
+                    print(f"   {idx}. {coin}: {stats['count']} связок, макс. спред {stats['max_spread']:.4f}%")
+
+                # Топ-5 самых прибыльных
+                print("\n" + "=" * 100)
+                print("🏆 ТОП-5 САМЫХ ПРИБЫЛЬНЫХ СВЯЗОК:")
+                print("=" * 100 + "\n")
+
+                for idx, opp in enumerate(opportunities[:5], 1):
+                    print(f"#{idx} | {opp['path']}")
+                    print(f"     Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+                    print(f"     Монеты: {' → '.join(opp['coins'])}")
+                    print(f"     Курсы:")
+                    print(f"       • Bybit {opp['coins'][0]}/USDT: {opp['bybit_rate_a']:.8f}")
+                    print(f"       • Обменник {opp['coins'][0]}/{opp['coins'][1]}: {opp['exchange_rate']:.8f}")
+                    print(f"       • Bybit {opp['coins'][1]}/USDT: {opp['bybit_rate_b']:.8f}")
+                    print()
 
         print("\n" + "=" * 100)
         print(f"✅ АНАЛИЗ ЗАВЕРШЁН ЗА {elapsed:.2f} СЕКУНД")
         print("=" * 100)
 
         print("\n⚠️  ВАЖНЫЕ ЗАМЕЧАНИЯ:")
-        print("   • Указанные спреды НЕ учитывают комиссии бирж (~0.1-0.2% за сделку)")
-        print("   • Переводы между биржами требуют времени и комиссий")
-        print("   • Проскальзывание цены может съесть часть прибыли")
-        print("   • Треугольный арбитраж требует наличия реальных торговых пар")
-        print("   • Всегда проверяйте актуальность данных перед сделкой!")
+        print("   • Указанные спреды НЕ учитывают:")
+        print("     - Комиссии Bybit за покупку/продажу (~0.1%)")
+        print("     - Комиссии обменника за обмен (обычно 0.5-2%)")
+        print("     - Комиссии сети за переводы")
+        print("     - Проскальзывание цены при больших объёмах")
+        print("   • Время выполнения связки:")
+        print("     - Покупка на Bybit: мгновенно")
+        print("     - Перевод на обменник: 10-60 минут (зависит от сети)")
+        print("     - Обмен: 5-30 минут")
+        print("     - Перевод обратно на Bybit: 10-60 минут")
+        print("     - Продажа на Bybit: мгновенно")
+        print("   • Цены могут измениться за время выполнения связки!")
+        print("   • Проверяйте минимальные суммы обмена на обменнике")
+        print("   • Всегда делайте тестовый обмен с минимальной суммой!")
+
+
+async def test_specific_pair():
+    """
+    Функция для тестирования конкретной пары монет
+    Раскомментируй и используй для детальной проверки
+    """
+    print("=" * 100)
+    print("🔬 ТЕСТ КОНКРЕТНОЙ ПАРЫ")
+    print("=" * 100)
+
+    async with BybitClientAsync() as bybit:
+        await bybit.load_usdt_pairs()
+
+        async with ChangeNowClientAsync(api_key=CHANGENOW_API_KEY) as changenow:
+            await changenow.load_available_currencies()
+
+            analyzer = ExchangeArbitrageAnalyzer(bybit, changenow)
+
+            # Пример: проверка связки LTC → BNB
+            result = await analyzer.analyze_specific_pair(
+                coin_a='LTC',
+                coin_b='BNB',
+                start_amount=100.0
+            )
+
+            print(f"\n📊 Результат: {result}")
 
 
 if __name__ == "__main__":
     try:
+        # Основной режим - поиск всех связок
         asyncio.run(main())
+
+        # Режим тестирования конкретной пары (раскомментируй если нужно)
+        # asyncio.run(test_specific_pair())
+
     except KeyboardInterrupt:
         print("\n⛔ Работа прервана пользователем.")
     except Exception as e:

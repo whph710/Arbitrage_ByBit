@@ -37,7 +37,7 @@ class ArbitrageAnalyzerAsync:
         # 2. Треугольный арбитраж на Bybit
         print("\n[Analyzer] 🔺 Поиск треугольного арбитража на Bybit...")
         bybit_tri = await self._find_triangular_single_exchange(
-            start_amount, min_spread, "Bybit", self.bybit.usdt_pairs
+            start_amount, min_spread, "Bybit", self.bybit
         )
         opportunities.extend(bybit_tri)
         print(f"[Analyzer]   ✓ Найдено возможностей: {len(bybit_tri)}")
@@ -45,7 +45,7 @@ class ArbitrageAnalyzerAsync:
         # 3. Треугольный арбитраж на Binance
         print("\n[Analyzer] 🔺 Поиск треугольного арбитража на Binance...")
         binance_tri = await self._find_triangular_single_exchange(
-            start_amount, min_spread, "Binance", self.binance.usdt_pairs
+            start_amount, min_spread, "Binance", self.binance
         )
         opportunities.extend(binance_tri)
         print(f"[Analyzer]   ✓ Найдено возможностей: {len(binance_tri)}")
@@ -54,7 +54,7 @@ class ArbitrageAnalyzerAsync:
         print("\n[Analyzer] 🔀 Поиск кросс-биржевого треугольного арбитража Bybit → Binance...")
         cross_bb = await self._find_triangular_cross_exchange(
             start_amount, min_spread, "Bybit", "Binance",
-            self.bybit.usdt_pairs, self.binance.usdt_pairs
+            self.bybit, self.binance
         )
         opportunities.extend(cross_bb)
         print(f"[Analyzer]   ✓ Найдено возможностей: {len(cross_bb)}")
@@ -63,7 +63,7 @@ class ArbitrageAnalyzerAsync:
         print("\n[Analyzer] 🔀 Поиск кросс-биржевого треугольного арбитража Binance → Bybit...")
         cross_ab = await self._find_triangular_cross_exchange(
             start_amount, min_spread, "Binance", "Bybit",
-            self.binance.usdt_pairs, self.bybit.usdt_pairs
+            self.binance, self.bybit
         )
         opportunities.extend(cross_ab)
         print(f"[Analyzer]   ✓ Найдено возможностей: {len(cross_ab)}")
@@ -123,7 +123,12 @@ class ArbitrageAnalyzerAsync:
                         'initial': start_amount,
                         'final': final_usdt,
                         'profit': final_usdt - start_amount,
-                        'spread': spread
+                        'spread': spread,
+                        'steps': [
+                            f"1. Покупка {amount_coin:.6f} {coin} на Bybit по цене ${bybit_price:.6f}",
+                            f"2. Перевод {amount_coin:.6f} {coin} с Bybit на Binance",
+                            f"3. Продажа {amount_coin:.6f} {coin} на Binance по цене ${binance_price:.6f}"
+                        ]
                     })
 
                 # Вариант 2: Покупка на Binance → Продажа на Bybit
@@ -140,7 +145,12 @@ class ArbitrageAnalyzerAsync:
                         'initial': start_amount,
                         'final': final_usdt,
                         'profit': final_usdt - start_amount,
-                        'spread': spread
+                        'spread': spread,
+                        'steps': [
+                            f"1. Покупка {amount_coin:.6f} {coin} на Binance по цене ${binance_price:.6f}",
+                            f"2. Перевод {amount_coin:.6f} {coin} с Binance на Bybit",
+                            f"3. Продажа {amount_coin:.6f} {coin} на Bybit по цене ${bybit_price:.6f}"
+                        ]
                     })
 
             except (KeyError, ZeroDivisionError, TypeError):
@@ -153,16 +163,14 @@ class ArbitrageAnalyzerAsync:
             start_amount: float,
             min_spread: float,
             exchange_name: str,
-            usdt_pairs: Dict[str, float]
+            exchange_client
     ) -> List[Dict]:
         """
         Треугольный арбитраж на одной бирже:
         USDT → CoinA → CoinB → USDT
         """
         opportunities = []
-
-        exchange_client = self.bybit if exchange_name == "Bybit" else self.binance
-
+        usdt_pairs = exchange_client.usdt_pairs
         coins = list(usdt_pairs.keys())
         checked = 0
 
@@ -197,8 +205,40 @@ class ArbitrageAnalyzerAsync:
                             'type': 'triangular_single',
                             'scheme': exchange_name,
                             'path': f"USDT → {coin_a} → {coin_b} → USDT",
+                            'coins': [coin_a, coin_b],
+                            'initial': start_amount,
+                            'final': final_usdt,
+                            'profit': final_usdt - start_amount,
                             'spread': spread,
-                            'profit': final_usdt - start_amount
+                            'steps': [
+                                f"1. Покупка {amount_a:.6f} {coin_a} за USDT по цене ${price_a_usdt:.6f}",
+                                f"2. Обмен {amount_a:.6f} {coin_a} на {amount_b:.6f} {coin_b} (курс {price_a_to_b:.6f})",
+                                f"3. Продажа {amount_b:.6f} {coin_b} за USDT по цене ${price_b_usdt:.6f}"
+                            ]
+                        })
+
+                    # Путь 2: USDT → CoinB → CoinA → USDT (обратное направление)
+                    price_b_to_a = price_b_usdt / price_a_usdt
+                    amount_b = start_amount / price_b_usdt
+                    amount_a = amount_b * price_b_to_a
+                    final_usdt = amount_a * price_a_usdt
+                    spread = ((final_usdt - start_amount) / start_amount) * 100
+
+                    if spread >= min_spread:
+                        opportunities.append({
+                            'type': 'triangular_single',
+                            'scheme': exchange_name,
+                            'path': f"USDT → {coin_b} → {coin_a} → USDT",
+                            'coins': [coin_b, coin_a],
+                            'initial': start_amount,
+                            'final': final_usdt,
+                            'profit': final_usdt - start_amount,
+                            'spread': spread,
+                            'steps': [
+                                f"1. Покупка {amount_b:.6f} {coin_b} за USDT по цене ${price_b_usdt:.6f}",
+                                f"2. Обмен {amount_b:.6f} {coin_b} на {amount_a:.6f} {coin_a} (курс {price_b_to_a:.6f})",
+                                f"3. Продажа {amount_a:.6f} {coin_a} за USDT по цене ${price_a_usdt:.6f}"
+                            ]
                         })
 
                 except Exception:
@@ -212,8 +252,8 @@ class ArbitrageAnalyzerAsync:
             min_spread: float,
             exchange_1: str,
             exchange_2: str,
-            prices_1: Dict[str, float],
-            prices_2: Dict[str, float]
+            client_1,
+            client_2
     ) -> List[Dict]:
         """
         Треугольный кросс-биржевой арбитраж:
@@ -222,7 +262,8 @@ class ArbitrageAnalyzerAsync:
         """
         opportunities = []
 
-        exchange2_client = self.bybit if exchange_2 == "Bybit" else self.binance
+        prices_1 = client_1.usdt_pairs
+        prices_2 = client_2.usdt_pairs
         common_coins = set(prices_1.keys()) & set(prices_2.keys())
 
         for coin_a in common_coins:
@@ -230,7 +271,8 @@ class ArbitrageAnalyzerAsync:
                 if coin_a == coin_b:
                     continue
 
-                if not exchange2_client.has_trading_pair(coin_a, coin_b):
+                # Проверяем наличие пары CoinA/CoinB на второй бирже
+                if not client_2.has_trading_pair(coin_a, coin_b):
                     continue
 
                 try:
@@ -241,9 +283,14 @@ class ArbitrageAnalyzerAsync:
                     if price_a_exch1 <= 0 or price_a_exch2 <= 0 or price_b_exch2 <= 0:
                         continue
 
+                    # Покупаем CoinA на Exchange1
                     amount_a = start_amount / price_a_exch1
+
+                    # Обмениваем CoinA на CoinB на Exchange2
                     cross_rate = price_a_exch2 / price_b_exch2
                     amount_b = amount_a * cross_rate
+
+                    # Продаём CoinB за USDT на Exchange2
                     final_usdt = amount_b * price_b_exch2
                     spread = ((final_usdt - start_amount) / start_amount) * 100
 
@@ -252,8 +299,17 @@ class ArbitrageAnalyzerAsync:
                             'type': 'triangular_cross',
                             'scheme': f"{exchange_1} → {exchange_2}",
                             'path': f"USDT → {coin_a} → {coin_b} → USDT",
+                            'coins': [coin_a, coin_b],
+                            'initial': start_amount,
+                            'final': final_usdt,
+                            'profit': final_usdt - start_amount,
                             'spread': spread,
-                            'profit': final_usdt - start_amount
+                            'steps': [
+                                f"1. Покупка {amount_a:.6f} {coin_a} на {exchange_1} по цене ${price_a_exch1:.6f}",
+                                f"2. Перевод {amount_a:.6f} {coin_a} с {exchange_1} на {exchange_2}",
+                                f"3. Обмен {amount_a:.6f} {coin_a} на {amount_b:.6f} {coin_b} на {exchange_2} (курс {cross_rate:.6f})",
+                                f"4. Продажа {amount_b:.6f} {coin_b} за USDT на {exchange_2} по цене ${price_b_exch2:.6f}"
+                            ]
                         })
 
                 except Exception:

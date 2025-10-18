@@ -66,34 +66,62 @@ class BinanceClientAsync:
 
             self.usdt_pairs.clear()
             self.coins.clear()
+            self.trading_pairs.clear()  # Очищаем торговые пары
             filtered_count = 0
 
             for ticker in data:
                 symbol = ticker.get('symbol', '').upper()
-                if not symbol.endswith('USDT'):
-                    continue
 
-                base = symbol[:-4]  # Убираем 'USDT' из конца
+                # Обрабатываем USDT пары
+                if symbol.endswith('USDT'):
+                    base = symbol[:-4]  # Убираем 'USDT' из конца
 
-                # Применяем фильтр монет
-                if not self._should_include_coin(base):
-                    filtered_count += 1
-                    continue
+                    # Применяем фильтр монет
+                    if not self._should_include_coin(base):
+                        filtered_count += 1
+                        continue
 
-                try:
-                    price = float(ticker.get('price', 0))
-                    if price > 0:
-                        self.usdt_pairs[base] = price
-                        self.coins.add(base)
-                except (ValueError, TypeError):
-                    continue
+                    try:
+                        price = float(ticker.get('price', 0))
+                        if price > 0:
+                            self.usdt_pairs[base] = price
+                            self.coins.add(base)
+                            self.trading_pairs.add(('USDT', base))  # USDT -> BASE
+                    except (ValueError, TypeError):
+                        continue
+
+                # Сохраняем все остальные торговые пары для треугольного арбитража
+                else:
+                    # Пытаемся определить базу и квоту
+                    # Проверяем распространенные квоты: BTC, ETH, BNB, USDT
+                    for quote in ['BTC', 'ETH', 'BNB', 'USDT', 'BUSD']:
+                        if symbol.endswith(quote) and len(symbol) > len(quote):
+                            base = symbol[:-len(quote)]
+                            if self._should_include_coin(base) and self._should_include_coin(quote):
+                                self.trading_pairs.add((quote, base))  # QUOTE -> BASE
+                            break
 
             print(f"[Binance] ✓ Загружено {len(self.usdt_pairs)} торговых пар USDT")
+            print(f"[Binance] ✓ Найдено {len(self.trading_pairs)} всех торговых пар")
             if filtered_count > 0:
                 print(f"[Binance] 🔍 Отфильтровано монет: {filtered_count}")
 
         except Exception as e:
             print(f"[Binance] ❌ Ошибка при загрузке пар: {e}")
+
+    def has_trading_pair(self, coin_a: str, coin_b: str) -> bool:
+        """
+        Проверяет наличие торговой пары между двумя монетами
+
+        Args:
+            coin_a: Первая монета (база)
+            coin_b: Вторая монета (квота)
+
+        Returns:
+            True если пара существует (в любом направлении)
+        """
+        # Проверяем оба направления: A/B и B/A
+        return (coin_a, coin_b) in self.trading_pairs or (coin_b, coin_a) in self.trading_pairs
 
     async def get_usdt_tickers(self) -> Dict[str, float]:
         """Получает все USDT-пары с Binance (для совместимости со старым кодом)"""
