@@ -60,20 +60,24 @@ class SwapzoneClientAsync:
                         continue
 
                     if response.status == 400:
-                        # Ошибка 400 - неверные параметры
+                        return None
+
+                    if response.status == 401:
+                        if attempt == 0:
+                            print(f"[Swapzone] ❌ Ошибка авторизации (401): Проверьте API ключ")
                         return None
 
                     response.raise_for_status()
-                    return await response.json()
+                    data = await response.json()
+
+                    return data
 
             except aiohttp.ClientResponseError as e:
                 if e.status == 429 and attempt < retries:
                     await asyncio.sleep(RETRY_DELAY * (2 ** attempt))
                     continue
-                if e.status == 400:
+                if e.status in (400, 401):
                     return None
-                if attempt == retries:
-                    print(f"[Swapzone] ❌ Ошибка {e.status} для {endpoint}")
                 return None
 
             except asyncio.TimeoutError:
@@ -91,60 +95,72 @@ class SwapzoneClientAsync:
         return None
 
     async def load_available_currencies(self):
-        """Загружает список доступных валют"""
+        """Загружает список доступных валют по документации Swapzone API"""
         print("[Swapzone] 📥 Загрузка доступных валют...")
 
-        data = await self._make_request("currencies")
+        # По документации endpoint: /v1/exchange/currencies
+        data = await self._make_request("exchange/currencies")
 
         if not data:
-            print("[Swapzone] ❌ Не удалось загрузить валюты")
+            print("[Swapzone] ❌ Не удалось загрузить валюты (пустой ответ)")
             return
 
         self.available_currencies.clear()
 
-        # Swapzone возвращает массив валют
-        if isinstance(data, list):
-            for currency in data:
-                ticker = currency.get('symbol', '').upper()
-                if ticker:
-                    self.available_currencies[ticker] = {
-                        'ticker': ticker,
-                        'name': currency.get('name', ''),
-                        'network': currency.get('network', ''),
-                        'is_available': currency.get('isAvailable', True)
-                    }
-        elif isinstance(data, dict) and 'currencies' in data:
-            for currency in data['currencies']:
-                ticker = currency.get('symbol', '').upper()
-                if ticker:
-                    self.available_currencies[ticker] = {
-                        'ticker': ticker,
-                        'name': currency.get('name', ''),
-                        'network': currency.get('network', ''),
-                        'is_available': currency.get('isAvailable', True)
-                    }
+        # По документации Swapzone возвращает объект с полем "result"
+        currencies_list = []
+
+        if isinstance(data, dict) and 'result' in data:
+            currencies_list = data['result']
+        elif isinstance(data, list):
+            currencies_list = data
+        else:
+            print(f"[Swapzone] ⚠️ Неизвестный формат ответа")
+            return
+
+        if not currencies_list:
+            print("[Swapzone] ❌ Список валют пуст")
+            return
+
+        # По документации каждая валюта имеет поля: ticker, name, network
+        for currency in currencies_list:
+            if not isinstance(currency, dict):
+                continue
+
+            # Основное поле - ticker
+            ticker = currency.get('ticker', currency.get('symbol', '')).upper()
+
+            if not ticker:
+                continue
+
+            # Сохраняем информацию о валюте
+            self.available_currencies[ticker] = {
+                'ticker': ticker,
+                'name': currency.get('name', ''),
+                'network': currency.get('network', ''),
+                'has_memo': currency.get('hasMemo', False),
+                'is_available': currency.get('isAvailable', True)
+            }
 
         print(f"[Swapzone] ✓ Загружено {len(self.available_currencies)} валют")
+
+        if len(self.available_currencies) > 0:
+            # Показываем примеры валют
+            sample = list(self.available_currencies.keys())[:10]
+            print(f"[Swapzone] 💎 Примеры: {', '.join(sample)}")
+        else:
+            print(f"[Swapzone] ⚠️ ВНИМАНИЕ: Ни одна валюта не загружена!")
+            print(f"[Swapzone] Проверьте API ключ и доступность сервиса")
 
     async def get_best_exchange_rate(
             self,
             from_currency: str,
             to_currency: str,
             from_amount: float,
-            rateType: str = "all"  # all, fixed, float
+            rateType: str = "all"
     ) -> Optional[Dict]:
         """
-        Получает лучший курс обмена через все доступные обменники
-
-        Returns:
-            {
-                'to_amount': float,
-                'from_amount': float,
-                'from_currency': str,
-                'to_currency': str,
-                'exchange_name': str,
-                'rate': float (опционально)
-            }
+        Получает лучший курс обмена через Swapzone API
         """
         pair_key = f"{from_currency}_{to_currency}"
 
@@ -152,46 +168,85 @@ class SwapzoneClientAsync:
         if pair_key in self.failed_pairs:
             return None
 
+        # Параметры запроса
         params = {
             'from': from_currency.lower(),
             'to': to_currency.lower(),
-            'amount': from_amount,
-            'rateType': rateType
+            'amount': str(from_amount)
         }
 
-        data = await self._make_request("exchange/get-rate", params=params)
+        # Сначала пробуем get-offers
+        data = await self._make_request("exchange/get-offers", params=params)
+
+        # Если не сработало (Empty response), пробуем get-rate
+        if not data or 'error' in data:
+            data = await self._make_request("exchange/get-rate", params={**params, 'rateType': rateType})
 
         if not data:
             self.failed_pairs.add(pair_key)
             return None
 
         try:
-            # Swapzone возвращает массив предложений от разных обменников
-            # Берём лучшее предложение (с максимальной суммой получения)
-            offers = data if isinstance(data, list) else data.get('offers', [])
-
-            if not offers:
+            # Проверяем на ошибку API
+            if 'error' in data and data.get('error') is True:
                 self.failed_pairs.add(pair_key)
                 return None
 
-            # Находим предложение с максимальной суммой получения
-            best_offer = max(offers, key=lambda x: float(x.get('amountTo', 0)))
-
-            to_amount = float(best_offer.get('amountTo', 0))
-
-            if to_amount <= 0:
+            # Вариант 1: Ответ - это массив офферов
+            if isinstance(data, list) and len(data) > 0:
+                offers = data
+            # Вариант 2: Ответ - объект с полем offers
+            elif 'offers' in data:
+                offers = data['offers']
+            # Вариант 3: Ответ - это один оффер с полями adapter, amountTo
+            elif 'amountTo' in data and 'adapter' in data:
+                offers = [data]
+            else:
                 self.failed_pairs.add(pair_key)
                 return None
+
+            if not offers or len(offers) == 0:
+                self.failed_pairs.add(pair_key)
+                return None
+
+            # Находим лучший оффер (с максимальной суммой получения)
+            best_offer = None
+            max_amount = 0
+
+            for offer in offers:
+                if not isinstance(offer, dict):
+                    continue
+
+                # Ищем сумму получения
+                amount_to = offer.get('amountTo', offer.get('toAmount', 0))
+
+                try:
+                    amount_to = float(amount_to)
+                except (ValueError, TypeError):
+                    continue
+
+                if amount_to > max_amount:
+                    max_amount = amount_to
+                    best_offer = offer
+
+            if not best_offer or max_amount <= 0:
+                self.failed_pairs.add(pair_key)
+                return None
+
+            # Получаем имя провайдера (adapter)
+            provider = best_offer.get('adapter',
+                                      best_offer.get('exchangeName',
+                                                     best_offer.get('provider', 'Swapzone')))
 
             return {
-                'to_amount': to_amount,
+                'to_amount': max_amount,
                 'from_amount': from_amount,
                 'from_currency': from_currency,
                 'to_currency': to_currency,
-                'exchange_name': best_offer.get('provider', 'Unknown')
+                'exchange_name': provider
             }
 
-        except (ValueError, TypeError, KeyError) as e:
+        except (ValueError, TypeError, KeyError):
             self.failed_pairs.add(pair_key)
             return None
 
