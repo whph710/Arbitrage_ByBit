@@ -167,6 +167,15 @@ class ContinuousArbitrageMonitor:
         print(f"⏰ {timestamp} | НАЙДЕНА СВЯЗКА #{self.total_opportunities_found}")
         print(f"{'─' * 100}")
         print(f"📍 Путь: {opp['path']}")
+
+        # Добавляем ссылки на Bybit и обменник
+        if 'bybit_url_a' in opp:
+            print(f"🔗 Bybit {opp['coins'][0]}/USDT: {opp['bybit_url_a']}")
+        if 'bybit_url_b' in opp:
+            print(f"🔗 Bybit {opp['coins'][1]}/USDT: {opp['bybit_url_b']}")
+        if 'exchanger_url' in opp:
+            print(f"🔗 Обменник: {opp['exchanger_url']}")
+
         print(f"💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
         print(f"💵 ${opp['initial']:.2f} → ${opp['final']:.2f}")
         print(f"🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")

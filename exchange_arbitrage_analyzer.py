@@ -24,6 +24,14 @@ class ExchangeArbitrageAnalyzer:
         self.hot_pairs_cache = {}
         self.pair_performance = defaultdict(lambda: {'checks': 0, 'finds': 0, 'avg_spread': 0})
 
+    def _get_bybit_trade_url(self, coin: str, quote: str = 'USDT') -> str:
+        """Генерирует ссылку на торговую пару Bybit"""
+        return f"https://www.bybit.com/ru-RU/trade/spot/{coin}/{quote}"
+
+    def _get_bestchange_exchanger_url(self, exchanger_id: int) -> str:
+        """Генерирует ссылку на обменник BestChange"""
+        return f"https://www.bestchange.com/click.php?id={exchanger_id}"
+
     async def find_opportunities(
             self,
             start_amount: float = 100.0,
@@ -260,6 +268,9 @@ class ExchangeArbitrageAnalyzer:
                 'liquidity_b': self.bybit.get_liquidity_score(coin_b, 'USDT'),
                 'volume_a': self.bybit.get_volume_24h(coin_a, 'USDT'),
                 'volume_b': self.bybit.get_volume_24h(coin_b, 'USDT'),
+                'bybit_url_a': self._get_bybit_trade_url(coin_a),
+                'bybit_url_b': self._get_bybit_trade_url(coin_b),
+                'exchanger_url': self._get_bestchange_exchanger_url(best_rate.exchanger_id),
                 'steps': [
                     f"1️⃣  Купить {amount_coin_a:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (${price_a_usdt:.8f})",
                     f"2️⃣  Перевести {amount_coin_a:.8f} {coin_a} с Bybit на {best_rate.exchanger}",
@@ -282,6 +293,9 @@ class ExchangeArbitrageAnalyzer:
         """Выводит найденную возможность сразу в консоль"""
         print(f"\n🎯 НАЙДЕНА СВЯЗКА #{rank} через BestChange")
         print(f"   📍 Путь: {opp['path']}")
+        print(f"   🔗 Bybit {opp['coins'][0]}/USDT: {opp['bybit_url_a']}")
+        print(f"   🔗 Bybit {opp['coins'][1]}/USDT: {opp['bybit_url_b']}")
+        print(f"   🔗 Обменник: {opp['exchanger_url']}")
         print(f"   💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
         print(f"   🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")
         print(
