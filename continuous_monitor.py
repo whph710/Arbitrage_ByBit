@@ -173,10 +173,18 @@ class ContinuousArbitrageMonitor:
             print(f"🔗 Bybit {opp['coins'][0]}/USDT: {opp['bybit_url_a']}")
         if 'bybit_url_b' in opp:
             print(f"🔗 Bybit {opp['coins'][1]}/USDT: {opp['bybit_url_b']}")
+        if 'bybit_deposit_url' in opp:
+            print(f"🔗 Депозит Bybit: {opp['bybit_deposit_url']}")
+        if 'bybit_withdraw_url' in opp:
+            print(f"🔗 Вывод Bybit: {opp['bybit_withdraw_url']}")
         if 'exchanger_url' in opp:
             print(f"🔗 Обменник: {opp['exchanger_url']}")
 
         print(f"💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+
+        # Показываем комиссии Bybit
+        if 'bybit_total_fee' in opp:
+            print(f"💳 Комиссии Bybit: ${opp['bybit_total_fee']:.4f} (покупка: ${opp['bybit_fee_buy']:.4f}, продажа: ${opp['bybit_fee_sell']:.4f})")
         print(f"💵 ${opp['initial']:.2f} → ${opp['final']:.2f}")
         print(f"🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")
 

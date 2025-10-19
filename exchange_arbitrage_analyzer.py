@@ -14,6 +14,10 @@ class ExchangeArbitrageAnalyzer:
     мы инвертируем их в GET (сколько получить)
     """
 
+    # Комиссии Bybit Spot
+    BYBIT_TAKER_FEE = 0.001800  # 0.1800%
+    BYBIT_MAKER_FEE = 0.001000  # 0.1000%
+
     def __init__(self, bybit_client, bestchange_client):
         self.bybit = bybit_client
         self.bestchange = bestchange_client
@@ -28,9 +32,33 @@ class ExchangeArbitrageAnalyzer:
         """Генерирует ссылку на торговую пару Bybit"""
         return f"https://www.bybit.com/ru-RU/trade/spot/{coin}/{quote}"
 
+    def _get_bybit_deposit_url(self) -> str:
+        """Генерирует ссылку на страницу депозита Bybit"""
+        return "https://www.bybit.com/user/assets/deposit?source=AssetDeposit"
+
+    def _get_bybit_withdraw_url(self) -> str:
+        """Генерирует ссылку на страницу вывода Bybit"""
+        return "https://www.bybit.com/user/assets/home/overview"
+
     def _get_bestchange_exchanger_url(self, exchanger_id: int) -> str:
         """Генерирует ссылку на обменник BestChange"""
         return f"https://www.bestchange.com/click.php?id={exchanger_id}"
+
+    def _calculate_bybit_fees(self, amount: float, is_taker: bool = True) -> tuple:
+        """
+        Рассчитывает комиссии Bybit
+
+        Args:
+            amount: Сумма сделки
+            is_taker: True для Taker (0.18%), False для Maker (0.10%)
+
+        Returns:
+            (сумма_комиссии, сумма_после_комиссии)
+        """
+        fee_rate = self.BYBIT_TAKER_FEE if is_taker else self.BYBIT_MAKER_FEE
+        fee_amount = amount * fee_rate
+        amount_after_fee = amount - fee_amount
+        return fee_amount, amount_after_fee
 
     async def find_opportunities(
             self,
@@ -54,6 +82,8 @@ class ExchangeArbitrageAnalyzer:
         print(f"[BestChange Arbitrage] Параметры: ${start_amount}, спред {min_spread}%-{max_spread}%")
         print(f"[BestChange Arbitrage] ⚡ Параллельных запросов: {parallel_requests}")
         print(f"[BestChange Arbitrage] 💰 Мин. резерв: ${min_reserve}, мин. прибыль: ${MIN_PROFIT_USD}")
+        print(
+            f"[BestChange Arbitrage] 💳 Комиссии Bybit: Taker {self.BYBIT_TAKER_FEE * 100:.4f}%, Maker {self.BYBIT_MAKER_FEE * 100:.4f}%")
 
         opportunities = []
 
@@ -186,11 +216,8 @@ class ExchangeArbitrageAnalyzer:
             min_reserve: float
     ) -> Optional[Dict]:
         """
-        Проверяет одну пару монет (ПОЛНОСТЬЮ ИСПРАВЛЕНО)
-        Схема: USDT → CoinA (Bybit) → CoinB (BestChange) → USDT (Bybit)
-
-        КРИТИЧНО: BestChange возвращает GIVE курс (сколько отдать CoinA за 1 CoinB)
-        Мы инвертируем его в GET курс: exchange_rate = 1 / give_rate
+        Проверяет одну пару монет с учетом комиссий Bybit
+        Схема: USDT → CoinA (Bybit + fee) → CoinB (BestChange) → USDT (Bybit + fee)
         """
         try:
             # Получаем цены на Bybit
@@ -207,9 +234,6 @@ class ExchangeArbitrageAnalyzer:
             if not best_rate:
                 return None
 
-            # КРИТИЧНО: BestChange даёт курс "GIVE" (сколько отдать FROM за 1 TO)
-            # Нам нужен курс "GET" (сколько получить TO за 1 FROM)
-            # Поэтому инвертируем: exchange_rate = 1 / give_rate
             give_rate = best_rate.rankrate
             if give_rate <= 0:
                 return None
@@ -220,16 +244,21 @@ class ExchangeArbitrageAnalyzer:
             if exchange_rate <= 0:
                 return None
 
-            # Расчёт арбитража с исправленным курсом
-            # Шаг 1: Покупаем coin_a за USDT на Bybit
-            amount_coin_a = start_amount / price_a_usdt
+            # === РАСЧЁТ С УЧЁТОМ КОМИССИЙ BYBIT ===
 
-            # Шаг 2: Обмениваем coin_a на coin_b через BestChange
-            # exchange_rate = сколько coin_b получим за 1 coin_a
+            # Шаг 1: Покупаем coin_a за USDT на Bybit (Taker 0.18%)
+            amount_coin_a_gross = start_amount / price_a_usdt
+            fee_buy, amount_coin_a = self._calculate_bybit_fees(amount_coin_a_gross, is_taker=True)
+
+            # Шаг 2: Обмениваем coin_a на coin_b через BestChange (без комиссии от нас)
             amount_coin_b = amount_coin_a * exchange_rate
 
-            # Шаг 3: Продаём coin_b за USDT на Bybit
-            final_usdt = amount_coin_b * price_b_usdt
+            # Шаг 3: Продаём coin_b за USDT на Bybit (Taker 0.18%)
+            usdt_gross = amount_coin_b * price_b_usdt
+            fee_sell, final_usdt = self._calculate_bybit_fees(usdt_gross, is_taker=True)
+
+            # Общая комиссия Bybit
+            total_bybit_fee = fee_buy * price_a_usdt + fee_sell
 
             # Проверка лимитов обменника
             if best_rate.give_min > 0 and amount_coin_a < best_rate.give_min:
@@ -249,7 +278,7 @@ class ExchangeArbitrageAnalyzer:
             if profit < MIN_PROFIT_USD:
                 return None
 
-            # Возвращаем результат с ИСПРАВЛЕННЫМ курсом
+            # Возвращаем результат
             return {
                 'type': 'bestchange_arbitrage',
                 'path': f"USDT → {coin_a} → {coin_b} → USDT",
@@ -270,17 +299,29 @@ class ExchangeArbitrageAnalyzer:
                 'volume_b': self.bybit.get_volume_24h(coin_b, 'USDT'),
                 'bybit_url_a': self._get_bybit_trade_url(coin_a),
                 'bybit_url_b': self._get_bybit_trade_url(coin_b),
+                'bybit_deposit_url': self._get_bybit_deposit_url(),
+                'bybit_withdraw_url': self._get_bybit_withdraw_url(),
                 'exchanger_url': self._get_bestchange_exchanger_url(best_rate.exchanger_id),
+                'bybit_fee_buy': fee_buy * price_a_usdt,
+                'bybit_fee_sell': fee_sell,
+                'bybit_total_fee': total_bybit_fee,
                 'steps': [
-                    f"1️⃣  Купить {amount_coin_a:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (${price_a_usdt:.8f})",
+                    f"1️⃣  Купить {amount_coin_a_gross:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (цена: ${price_a_usdt:.8f})",
+                    f"    💳 Комиссия Bybit (Taker 0.18%): {fee_buy:.8f} {coin_a} (${fee_buy * price_a_usdt:.4f})",
+                    f"    ✅ Получено: {amount_coin_a:.8f} {coin_a}",
                     f"2️⃣  Перевести {amount_coin_a:.8f} {coin_a} с Bybit на {best_rate.exchanger}",
-                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} (курс GET: 1 {coin_a} = {exchange_rate:.8f} {coin_b})",
+                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} на {best_rate.exchanger}",
+                    f"    📊 Курс GET: 1 {coin_a} = {exchange_rate:.8f} {coin_b}",
                     f"4️⃣  Перевести {amount_coin_b:.8f} {coin_b} с обменника на Bybit",
-                    f"5️⃣  Продать {amount_coin_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (${price_b_usdt:.8f})",
-                    f"✅ ИТОГ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{profit:.2f} USDT, {spread:.4f}%)"
+                    f"5️⃣  Продать {amount_coin_b:.8f} {coin_b} за {usdt_gross:.2f} USDT на Bybit (цена: ${price_b_usdt:.8f})",
+                    f"    💳 Комиссия Bybit (Taker 0.18%): ${fee_sell:.4f}",
+                    f"    ✅ Получено: {final_usdt:.2f} USDT",
+                    f"",
+                    f"💰 ИТОГО комиссий Bybit: ${total_bybit_fee:.4f}",
+                    f"✅ ЧИСТАЯ ПРИБЫЛЬ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{profit:.2f} USDT, {spread:.4f}%)"
                 ],
-                'exchange_rate': exchange_rate,  # GET курс (сколько получаем)
-                'give_rate': give_rate,  # GIVE курс (из BestChange)
+                'exchange_rate': exchange_rate,
+                'give_rate': give_rate,
                 'bybit_rate_a': price_a_usdt,
                 'bybit_rate_b': price_b_usdt,
                 'timestamp': datetime.now().isoformat()
@@ -295,8 +336,12 @@ class ExchangeArbitrageAnalyzer:
         print(f"   📍 Путь: {opp['path']}")
         print(f"   🔗 Bybit {opp['coins'][0]}/USDT: {opp['bybit_url_a']}")
         print(f"   🔗 Bybit {opp['coins'][1]}/USDT: {opp['bybit_url_b']}")
+        print(f"   🔗 Депозит Bybit: {opp['bybit_deposit_url']}")
+        print(f"   🔗 Вывод Bybit: {opp['bybit_withdraw_url']}")
         print(f"   🔗 Обменник: {opp['exchanger_url']}")
         print(f"   💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+        print(
+            f"   💳 Комиссии Bybit: ${opp['bybit_total_fee']:.4f} (покупка: ${opp['bybit_fee_buy']:.4f}, продажа: ${opp['bybit_fee_sell']:.4f})")
         print(f"   🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")
         print(
             f"   💧 Ликвидность: {opp['coins'][0]} ({opp['liquidity_a']:.1f}) → {opp['coins'][1]} ({opp['liquidity_b']:.1f})")
@@ -344,7 +389,6 @@ class ExchangeArbitrageAnalyzer:
 
             print(f"   ✓ Найдено {len(top_rates)} обменников:")
             for idx, rate in enumerate(top_rates, 1):
-                # Инвертируем GIVE курс в GET курс
                 get_rate = 1.0 / rate.rankrate if rate.rankrate > 0 else 0
                 amount_b = amount_coin_a * get_rate
                 print(

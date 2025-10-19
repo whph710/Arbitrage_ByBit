@@ -13,7 +13,7 @@ if ENV_PATH.exists():
 # ОСНОВНЫЕ ПАРАМЕТРЫ НЕПРЕРЫВНОГО МОНИТОРИНГА
 # ============================================================================
 START_AMOUNT = float(os.getenv("START_AMOUNT", 100.0))
-MIN_SPREAD = float(os.getenv("MIN_SPREAD", 0.3))  # Минимальный спред для вывода
+MIN_SPREAD = float(os.getenv("MIN_SPREAD", 0.1))  # Минимальный спред для вывода
 MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", 0.5))  # Минимальная прибыль в долларах
 MAX_REASONABLE_SPREAD = float(os.getenv("MAX_REASONABLE_SPREAD", 50.0))
 
