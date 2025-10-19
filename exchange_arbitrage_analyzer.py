@@ -10,8 +10,9 @@ class ExchangeArbitrageAnalyzer:
     Оптимизированный анализатор арбитража через обменники (BestChange)
     Схема: Bybit (купить A) → BestChange (обменять A→B) → Bybit (продать B)
 
-    КРИТИЧНО: BestChange API возвращает курсы GIVE (сколько отдать),
-    мы инвертируем их в GET (сколько получить)
+    С учетом:
+    - Комиссий Bybit на торговлю (Taker/Maker)
+    - Комиссий Bybit на вывод монет (через API)
     """
 
     # Комиссии Bybit Spot
@@ -60,6 +61,47 @@ class ExchangeArbitrageAnalyzer:
         amount_after_fee = amount - fee_amount
         return fee_amount, amount_after_fee
 
+    def _get_withdrawal_fee_in_usdt(self, coin: str, amount: float, price_usdt: float) -> tuple:
+        """
+        Получает комиссию на вывод монеты в USDT
+
+        Args:
+            coin: Тикер монеты
+            amount: Количество монет для вывода
+            price_usdt: Цена монеты в USDT
+
+        Returns:
+            (комиссия_в_монетах, комиссия_в_usdt, название_сети)
+        """
+        # Получаем минимальную комиссию на вывод
+        withdrawal_fee_coin = self.bybit.get_min_withdrawal_fee(coin)
+
+        if withdrawal_fee_coin is None:
+            # Если данные о комиссии недоступны, используем приблизительную оценку
+            # На основе типичных комиссий
+            estimated_fees = {
+                'BTC': 0.0005,
+                'ETH': 0.005,
+                'USDT': 1.0,
+                'USDC': 1.0,
+                'BNB': 0.0001,
+                'SOL': 0.01,
+                'XRP': 0.25,
+                'DOGE': 5.0,
+                'TRX': 1.0
+            }
+            withdrawal_fee_coin = estimated_fees.get(coin, 0.01)  # По умолчанию 0.01 монеты
+            best_chain = "неизвестна (оценка)"
+        else:
+            # Получаем информацию о лучшей сети
+            best_chain_info = self.bybit.get_best_withdrawal_chain(coin)
+            best_chain = best_chain_info['chain'] if best_chain_info else "неизвестна"
+
+        # Конвертируем в USDT
+        withdrawal_fee_usdt = withdrawal_fee_coin * price_usdt
+
+        return withdrawal_fee_coin, withdrawal_fee_usdt, best_chain
+
     async def find_opportunities(
             self,
             start_amount: float = 100.0,
@@ -70,6 +112,10 @@ class ExchangeArbitrageAnalyzer:
     ) -> List[Dict]:
         """
         Ищет арбитражные связки через обменники BestChange (ОПТИМИЗИРОВАНО)
+
+        С учетом:
+        - Комиссий Bybit на торговлю
+        - Комиссий Bybit на вывод (withdrawal fees)
 
         Args:
             start_amount: Начальная сумма в USDT
@@ -84,6 +130,12 @@ class ExchangeArbitrageAnalyzer:
         print(f"[BestChange Arbitrage] 💰 Мин. резерв: ${min_reserve}, мин. прибыль: ${MIN_PROFIT_USD}")
         print(
             f"[BestChange Arbitrage] 💳 Комиссии Bybit: Taker {self.BYBIT_TAKER_FEE * 100:.4f}%, Maker {self.BYBIT_MAKER_FEE * 100:.4f}%")
+
+        if self.bybit.withdrawal_info_loaded:
+            print(
+                f"[BestChange Arbitrage] ✅ Учитываются комиссии на вывод (загружено для {len(self.bybit.min_withdrawal_fees)} монет)")
+        else:
+            print(f"[BestChange Arbitrage] ⚠️  Комиссии на вывод будут оценочными (добавьте API ключи для точности)")
 
         opportunities = []
 
@@ -216,8 +268,10 @@ class ExchangeArbitrageAnalyzer:
             min_reserve: float
     ) -> Optional[Dict]:
         """
-        Проверяет одну пару монет с учетом комиссий Bybit
-        Схема: USDT → CoinA (Bybit + fee) → CoinB (BestChange) → USDT (Bybit + fee)
+        Проверяет одну пару монет с учетом ВСЕХ комиссий Bybit
+        Схема: USDT → CoinA (Bybit + trade fee) → CoinB (BestChange) → USDT (Bybit + trade fee)
+
+        НОВОЕ: Учитываются комиссии на вывод (withdrawal fees)
         """
         try:
             # Получаем цены на Bybit
@@ -244,26 +298,46 @@ class ExchangeArbitrageAnalyzer:
             if exchange_rate <= 0:
                 return None
 
-            # === РАСЧЁТ С УЧЁТОМ КОМИССИЙ BYBIT ===
+            # === РАСЧЁТ С УЧЁТОМ ВСЕХ КОМИССИЙ BYBIT ===
 
             # Шаг 1: Покупаем coin_a за USDT на Bybit (Taker 0.18%)
             amount_coin_a_gross = start_amount / price_a_usdt
             fee_buy, amount_coin_a = self._calculate_bybit_fees(amount_coin_a_gross, is_taker=True)
 
-            # Шаг 2: Обмениваем coin_a на coin_b через BestChange (без комиссии от нас)
-            amount_coin_b = amount_coin_a * exchange_rate
+            # Шаг 2: Выводим coin_a с Bybit (withdrawal fee)
+            withdraw_fee_a_coin, withdraw_fee_a_usdt, withdraw_chain_a = self._get_withdrawal_fee_in_usdt(
+                coin_a, amount_coin_a, price_a_usdt
+            )
+            amount_coin_a_after_withdraw = amount_coin_a - withdraw_fee_a_coin
 
-            # Шаг 3: Продаём coin_b за USDT на Bybit (Taker 0.18%)
+            if amount_coin_a_after_withdraw <= 0:
+                return None
+
+            # Шаг 3: Обмениваем coin_a на coin_b через BestChange (без комиссии от нас)
+            amount_coin_b = amount_coin_a_after_withdraw * exchange_rate
+
+            # Шаг 4: Вносим coin_b на Bybit (обычно без комиссии, но проверим минимум)
+            # Deposit обычно бесплатный, но учитываем минимальную сумму вывода с обменника
+
+            # Шаг 5: Выводим coin_b с обменника на Bybit (может быть комиссия обменника, но обычно включена в курс)
+
+            # Шаг 6: Продаём coin_b за USDT на Bybit (Taker 0.18%)
             usdt_gross = amount_coin_b * price_b_usdt
-            fee_sell, final_usdt = self._calculate_bybit_fees(usdt_gross, is_taker=True)
+            fee_sell, usdt_after_sell = self._calculate_bybit_fees(usdt_gross, is_taker=True)
 
-            # Общая комиссия Bybit
-            total_bybit_fee = fee_buy * price_a_usdt + fee_sell
+            # Шаг 7: Выводим USDT с Bybit (withdrawal fee) - НЕ УЧИТЫВАЕМ, т.к. конечный результат в USDT на Bybit
+            # Если бы выводили USDT, то нужно было бы вычесть комиссию
+            final_usdt = usdt_after_sell
+
+            # Общие комиссии Bybit
+            total_bybit_trading_fee = fee_buy * price_a_usdt + fee_sell
+            total_bybit_withdrawal_fee = withdraw_fee_a_usdt
+            total_bybit_fee = total_bybit_trading_fee + total_bybit_withdrawal_fee
 
             # Проверка лимитов обменника
-            if best_rate.give_min > 0 and amount_coin_a < best_rate.give_min:
+            if best_rate.give_min > 0 and amount_coin_a_after_withdraw < best_rate.give_min:
                 return None
-            if best_rate.give_max > 0 and amount_coin_a > best_rate.give_max:
+            if best_rate.give_max > 0 and amount_coin_a_after_withdraw > best_rate.give_max:
                 return None
 
             # Расчёт прибыли и спреда
@@ -304,20 +378,29 @@ class ExchangeArbitrageAnalyzer:
                 'exchanger_url': self._get_bestchange_exchanger_url(best_rate.exchanger_id),
                 'bybit_fee_buy': fee_buy * price_a_usdt,
                 'bybit_fee_sell': fee_sell,
+                'bybit_trading_fee': total_bybit_trading_fee,
+                'bybit_withdrawal_fee_a': withdraw_fee_a_usdt,
+                'bybit_withdrawal_fee_a_coin': withdraw_fee_a_coin,
+                'bybit_withdrawal_chain_a': withdraw_chain_a,
                 'bybit_total_fee': total_bybit_fee,
                 'steps': [
                     f"1️⃣  Купить {amount_coin_a_gross:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (цена: ${price_a_usdt:.8f})",
-                    f"    💳 Комиссия Bybit (Taker 0.18%): {fee_buy:.8f} {coin_a} (${fee_buy * price_a_usdt:.4f})",
+                    f"    💳 Комиссия торговли Bybit (Taker 0.18%): {fee_buy:.8f} {coin_a} (${fee_buy * price_a_usdt:.4f})",
                     f"    ✅ Получено: {amount_coin_a:.8f} {coin_a}",
-                    f"2️⃣  Перевести {amount_coin_a:.8f} {coin_a} с Bybit на {best_rate.exchanger}",
-                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} на {best_rate.exchanger}",
+                    f"2️⃣  Вывести {amount_coin_a:.8f} {coin_a} с Bybit",
+                    f"    💳 Комиссия на вывод Bybit ({withdraw_chain_a}): {withdraw_fee_a_coin:.8f} {coin_a} (${withdraw_fee_a_usdt:.4f})",
+                    f"    ✅ Выведено: {amount_coin_a_after_withdraw:.8f} {coin_a}",
+                    f"3️⃣  Обменять {amount_coin_a_after_withdraw:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} на {best_rate.exchanger}",
                     f"    📊 Курс GET: 1 {coin_a} = {exchange_rate:.8f} {coin_b}",
-                    f"4️⃣  Перевести {amount_coin_b:.8f} {coin_b} с обменника на Bybit",
+                    f"4️⃣  Внести {amount_coin_b:.8f} {coin_b} на Bybit (обычно без комиссии)",
                     f"5️⃣  Продать {amount_coin_b:.8f} {coin_b} за {usdt_gross:.2f} USDT на Bybit (цена: ${price_b_usdt:.8f})",
-                    f"    💳 Комиссия Bybit (Taker 0.18%): ${fee_sell:.4f}",
+                    f"    💳 Комиссия торговли Bybit (Taker 0.18%): ${fee_sell:.4f}",
                     f"    ✅ Получено: {final_usdt:.2f} USDT",
                     f"",
-                    f"💰 ИТОГО комиссий Bybit: ${total_bybit_fee:.4f}",
+                    f"💰 ИТОГО комиссий Bybit:",
+                    f"   • Торговые: ${total_bybit_trading_fee:.4f}",
+                    f"   • Вывод {coin_a}: ${withdraw_fee_a_usdt:.4f}",
+                    f"   • Всего: ${total_bybit_fee:.4f}",
                     f"✅ ЧИСТАЯ ПРИБЫЛЬ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{profit:.2f} USDT, {spread:.4f}%)"
                 ],
                 'exchange_rate': exchange_rate,
@@ -336,12 +419,12 @@ class ExchangeArbitrageAnalyzer:
         print(f"   📍 Путь: {opp['path']}")
         print(f"   🔗 Bybit {opp['coins'][0]}/USDT: {opp['bybit_url_a']}")
         print(f"   🔗 Bybit {opp['coins'][1]}/USDT: {opp['bybit_url_b']}")
-        print(f"   🔗 Депозит Bybit: {opp['bybit_deposit_url']}")
-        print(f"   🔗 Вывод Bybit: {opp['bybit_withdraw_url']}")
         print(f"   🔗 Обменник: {opp['exchanger_url']}")
         print(f"   💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+        print(f"   💳 Комиссии Bybit: ${opp['bybit_total_fee']:.4f}")
+        print(f"      • Торговые: ${opp['bybit_trading_fee']:.4f}")
         print(
-            f"   💳 Комиссии Bybit: ${opp['bybit_total_fee']:.4f} (покупка: ${opp['bybit_fee_buy']:.4f}, продажа: ${opp['bybit_fee_sell']:.4f})")
+            f"      • Вывод {opp['coins'][0]} ({opp['bybit_withdrawal_chain_a']}): ${opp['bybit_withdrawal_fee_a']:.4f}")
         print(f"   🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")
         print(
             f"   💧 Ликвидность: {opp['coins'][0]} ({opp['liquidity_a']:.1f}) → {opp['coins'][1]} ({opp['liquidity_b']:.1f})")
@@ -370,7 +453,7 @@ class ExchangeArbitrageAnalyzer:
             start_amount: float = 100.0,
             min_reserve: float = 0
     ) -> Dict:
-        """Анализирует конкретную пару монет"""
+        """Анализирует конкретную пару монет с учетом всех комиссий"""
         print(f"\n[BestChange Arbitrage] 🔬 Детальный анализ пары {coin_a} → {coin_b}")
 
         try:
@@ -381,6 +464,14 @@ class ExchangeArbitrageAnalyzer:
             amount_coin_a = start_amount / price_a_usdt
             print(f"   1. {start_amount} USDT → {amount_coin_a:.8f} {coin_a} (Bybit: ${price_a_usdt:.8f})")
 
+            # Комиссия на вывод
+            withdraw_fee_coin, withdraw_fee_usdt, chain = self._get_withdrawal_fee_in_usdt(coin_a, amount_coin_a,
+                                                                                           price_a_usdt)
+            amount_after_withdraw = amount_coin_a - withdraw_fee_coin
+            print(
+                f"   1a. Комиссия на вывод {coin_a} ({chain}): {withdraw_fee_coin:.8f} {coin_a} (${withdraw_fee_usdt:.4f})")
+            print(f"       После вывода: {amount_after_withdraw:.8f} {coin_a}")
+
             print(f"   2. Запрос курса {coin_a} → {coin_b} на BestChange...")
             top_rates = self.bestchange.get_top_rates(coin_a, coin_b, top_n=5, min_reserve=min_reserve)
 
@@ -390,13 +481,13 @@ class ExchangeArbitrageAnalyzer:
             print(f"   ✓ Найдено {len(top_rates)} обменников:")
             for idx, rate in enumerate(top_rates, 1):
                 get_rate = 1.0 / rate.rankrate if rate.rankrate > 0 else 0
-                amount_b = amount_coin_a * get_rate
+                amount_b = amount_after_withdraw * get_rate
                 print(
                     f"      {idx}. {rate.exchanger}: курс GET 1 {coin_a} = {get_rate:.8f} {coin_b} → {amount_b:.8f} {coin_b} (резерв: ${rate.reserve:,.0f})")
 
             best_rate = top_rates[0]
             get_rate = 1.0 / best_rate.rankrate if best_rate.rankrate > 0 else 0
-            amount_coin_b = amount_coin_a * get_rate
+            amount_coin_b = amount_after_withdraw * get_rate
 
             price_b_usdt = self.bybit.usdt_pairs.get(coin_b)
             if not price_b_usdt:
@@ -410,6 +501,7 @@ class ExchangeArbitrageAnalyzer:
 
             print(f"\n   ✅ Итог: {spread:.4f}% ({'+' if profit >= 0 else ''}{profit:.2f} USDT)")
             print(f"   🏦 Лучший обменник: {best_rate.exchanger}")
+            print(f"   💳 Комиссия на вывод {coin_a}: ${withdraw_fee_usdt:.4f}")
 
             return {
                 'success': True,
@@ -417,6 +509,7 @@ class ExchangeArbitrageAnalyzer:
                 'profit': profit,
                 'final_usdt': final_usdt,
                 'exchanger': best_rate.exchanger,
+                'withdrawal_fee': withdraw_fee_usdt,
                 'top_exchangers': [
                     {'name': r.exchanger, 'rate': 1.0 / r.rankrate if r.rankrate > 0 else 0, 'reserve': r.reserve}
                     for r in top_rates

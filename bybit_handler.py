@@ -1,6 +1,9 @@
 import aiohttp
 import asyncio
 import json
+import hmac
+import hashlib
+import time
 from typing import Dict, Set, Tuple, Optional, Callable
 from collections import deque
 from datetime import datetime
@@ -8,16 +11,19 @@ from configs_continuous import (
     BYBIT_API_URL, BYBIT_WS_URL, REQUEST_TIMEOUT, ENABLE_COIN_FILTER,
     BLACKLIST_COINS, WHITELIST_COINS, MIN_24H_VOLUME_USDT,
     MIN_LIQUIDITY_SCORE, USE_ONLY_TOP_LIQUID_COINS, WEBSOCKET_ENABLED,
-    WEBSOCKET_RECONNECT_DELAY, WEBSOCKET_PING_INTERVAL
+    WEBSOCKET_RECONNECT_DELAY, WEBSOCKET_PING_INTERVAL,
+    BYBIT_API_KEY, BYBIT_API_SECRET
 )
 
 
 class BybitClientAsync:
-    """Асинхронный клиент для Bybit с WebSocket поддержкой"""
+    """Асинхронный клиент для Bybit с WebSocket поддержкой и API для комиссий"""
 
     def __init__(self):
         self.base_url = BYBIT_API_URL
         self.ws_url = BYBIT_WS_URL
+        self.api_key = BYBIT_API_KEY
+        self.api_secret = BYBIT_API_SECRET
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/8.0)',
             'Accept': 'application/json'
@@ -33,6 +39,11 @@ class BybitClientAsync:
         self.trading_pairs: Dict[Tuple[str, str], float] = {}
         self.pair_volumes: Dict[Tuple[str, str], float] = {}
         self.pair_liquidity: Dict[Tuple[str, str], float] = {}
+
+        # Комиссии на вывод (кэш)
+        self.withdrawal_fees: Dict[str, Dict] = {}  # {coin: {chain: fee}}
+        self.min_withdrawal_fees: Dict[str, float] = {}  # {coin: min_fee}
+        self.withdrawal_info_loaded = False
 
         # WebSocket данные
         self.ws_prices: Dict[str, float] = {}
@@ -78,6 +89,187 @@ class BybitClientAsync:
         if self.session:
             await self.session.close()
             self.session = None
+
+    def _generate_signature(self, params: Dict) -> str:
+        """Генерирует HMAC SHA256 подпись для Bybit API"""
+        if not self.api_secret:
+            return ""
+
+        sign_payload = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            sign_payload.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        return signature
+
+    async def load_withdrawal_fees(self):
+        """
+        Загружает информацию о комиссиях на вывод через Bybit API
+        Требует API ключи (api_key и api_secret)
+        """
+        if not self.api_key or not self.api_secret:
+            print("[Bybit] ⚠️  API ключи не заданы, комиссии на вывод не будут загружены")
+            print("[Bybit] ℹ️  Для точного расчета прибыли добавьте BYBIT_API_KEY и BYBIT_API_SECRET в .env")
+            return False
+
+        if self.session is None:
+            await self.create_session()
+
+        try:
+            print("[Bybit] 📥 Загрузка комиссий на вывод...")
+
+            endpoint = "/v5/asset/coin/query-info"
+            timestamp = str(int(time.time() * 1000))
+
+            params = {
+                "api_key": self.api_key,
+                "timestamp": timestamp
+            }
+
+            # Генерируем подпись
+            params["sign"] = self._generate_signature(params)
+
+            url = f"{self.base_url}{endpoint}"
+
+            async with self.session.get(url, params=params) as response:
+                if response.status == 401:
+                    print("[Bybit] ❌ Ошибка авторизации API. Проверьте BYBIT_API_KEY и BYBIT_API_SECRET")
+                    return False
+
+                if response.status != 200:
+                    print(f"[Bybit] ⚠️  HTTP {response.status} при загрузке комиссий")
+                    return False
+
+                data = await response.json()
+
+                if data.get('retCode') != 0:
+                    print(f"[Bybit] ⚠️  API ошибка: {data.get('retMsg', 'Unknown error')}")
+                    return False
+
+            # Обрабатываем данные
+            self.withdrawal_fees.clear()
+            self.min_withdrawal_fees.clear()
+
+            rows = data.get('result', {}).get('rows', [])
+
+            for coin_info in rows:
+                coin = coin_info.get('coin', '').upper()
+                if not coin:
+                    continue
+
+                chains = coin_info.get('chains', [])
+                if not chains:
+                    continue
+
+                # Сохраняем комиссии для всех сетей
+                self.withdrawal_fees[coin] = {}
+                min_fee = float('inf')
+
+                for chain_info in chains:
+                    chain = chain_info.get('chain', '')
+                    chain_type = chain_info.get('chainType', '')
+                    withdraw_fee = chain_info.get('withdrawFee', '0')
+                    withdraw_min = chain_info.get('withdrawMin', '0')
+
+                    try:
+                        fee = float(withdraw_fee)
+                        min_amount = float(withdraw_min)
+
+                        # Сохраняем информацию о сети
+                        self.withdrawal_fees[coin][chain_type or chain] = {
+                            'fee': fee,
+                            'min': min_amount,
+                            'chain': chain
+                        }
+
+                        # Ищем минимальную комиссию
+                        if fee > 0 and fee < min_fee:
+                            min_fee = fee
+
+                    except (ValueError, TypeError):
+                        continue
+
+                # Сохраняем минимальную комиссию для монеты
+                if min_fee != float('inf'):
+                    self.min_withdrawal_fees[coin] = min_fee
+
+            self.withdrawal_info_loaded = True
+
+            print(f"[Bybit] ✅ Загружено комиссий для {len(self.withdrawal_fees)} монет")
+            print(f"[Bybit] 💰 Минимальных комиссий: {len(self.min_withdrawal_fees)}")
+
+            # Примеры комиссий для популярных монет
+            sample_coins = ['BTC', 'ETH', 'USDT', 'BNB', 'SOL']
+            print(f"[Bybit] 📊 Примеры минимальных комиссий на вывод:")
+            for coin in sample_coins:
+                if coin in self.min_withdrawal_fees:
+                    fee = self.min_withdrawal_fees[coin]
+                    chains = list(self.withdrawal_fees[coin].keys())
+                    print(f"        {coin}: {fee} (сети: {', '.join(chains[:3])})")
+
+            return True
+
+        except Exception as e:
+            print(f"[Bybit] ❌ Ошибка при загрузке комиссий: {e}")
+            return False
+
+    def get_min_withdrawal_fee(self, coin: str) -> Optional[float]:
+        """
+        Возвращает минимальную комиссию на вывод для монеты
+
+        Args:
+            coin: Тикер монеты (например, 'BTC', 'USDT')
+
+        Returns:
+            Минимальная комиссия или None если данные не загружены
+        """
+        coin = coin.upper()
+        return self.min_withdrawal_fees.get(coin)
+
+    def get_all_withdrawal_fees(self, coin: str) -> Optional[Dict]:
+        """
+        Возвращает все доступные комиссии для монеты по разным сетям
+
+        Args:
+            coin: Тикер монеты
+
+        Returns:
+            Словарь {chain: {'fee': float, 'min': float, 'chain': str}} или None
+        """
+        coin = coin.upper()
+        return self.withdrawal_fees.get(coin)
+
+    def get_best_withdrawal_chain(self, coin: str) -> Optional[Dict]:
+        """
+        Возвращает информацию о самой выгодной сети для вывода
+
+        Args:
+            coin: Тикер монеты
+
+        Returns:
+            {'chain': str, 'fee': float, 'min': float} или None
+        """
+        coin = coin.upper()
+        if coin not in self.withdrawal_fees:
+            return None
+
+        chains = self.withdrawal_fees[coin]
+        if not chains:
+            return None
+
+        # Находим сеть с минимальной комиссией
+        best_chain = min(
+            chains.items(),
+            key=lambda x: x[1]['fee']
+        )
+
+        return {
+            'chain': best_chain[0],
+            'fee': best_chain[1]['fee'],
+            'min': best_chain[1]['min'],
+            'chain_full': best_chain[1]['chain']
+        }
 
     def _should_include_coin(self, coin: str) -> bool:
         """Проверяет, должна ли монета быть включена в анализ"""
@@ -238,7 +430,7 @@ class BybitClientAsync:
 
             # Берём топ монет если указано
             if USE_ONLY_TOP_LIQUID_COINS > 0:
-                filtered_pairs = filtered_pairs[:USE_ONLY_TOP_LIQUID_COINS * 3]  # *3 потому что одна монета имеет несколько пар
+                filtered_pairs = filtered_pairs[:USE_ONLY_TOP_LIQUID_COINS * 3]
 
             # Сохраняем данные
             for pair in filtered_pairs:
@@ -266,7 +458,8 @@ class BybitClientAsync:
             if self.filtered_by_volume > 0:
                 print(f"[Bybit] 📉 Отфильтровано по объёму (<${MIN_24H_VOLUME_USDT:,.0f}): {self.filtered_by_volume}")
             if self.filtered_by_liquidity > 0:
-                print(f"[Bybit] 💧 Отфильтровано по ликвидности (score <{MIN_LIQUIDITY_SCORE}): {self.filtered_by_liquidity}")
+                print(
+                    f"[Bybit] 💧 Отфильтровано по ликвидности (score <{MIN_LIQUIDITY_SCORE}): {self.filtered_by_liquidity}")
 
             # Топ-10 самых ликвидных пар
             top_liquid = sorted(self.pair_liquidity.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -278,6 +471,9 @@ class BybitClientAsync:
 
             # Инициализируем WebSocket данные
             self.ws_prices = self.usdt_pairs.copy()
+
+            # Загружаем комиссии на вывод
+            await self.load_withdrawal_fees()
 
         except Exception as e:
             print(f"[Bybit] ❌ Ошибка при загрузке пар: {e}")
@@ -377,7 +573,7 @@ class BybitClientAsync:
                             print(f"[Bybit WS] 📊 Обработано обновлений: {self.ws_updates_count}")
 
                         # Вызываем callback если задан
-                        if self.on_price_update and abs(price - old_price) / old_price > 0.001:  # > 0.1% изменение
+                        if self.on_price_update and abs(price - old_price) / old_price > 0.001:
                             await self.on_price_update(coin, old_price, price)
 
         except Exception as e:
@@ -450,5 +646,5 @@ class BybitClientAsync:
             'updates_count': self.ws_updates_count,
             'tracked_pairs': len(self.ws_prices),
             'last_updates': len([t for t in self.last_update_time.values()
-                               if (datetime.now() - t).seconds < 60])
+                                 if (datetime.now() - t).seconds < 60])
         }
