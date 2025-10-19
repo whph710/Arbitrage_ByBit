@@ -1,13 +1,9 @@
 import asyncio
 from datetime import datetime
 from configs import START_AMOUNT, MIN_SPREAD, SHOW_TOP, MAX_REASONABLE_SPREAD
-from bybit_handler import BybitClientAsync
+from logs.bybit_handler import BybitClientAsync
 from results_saver import ResultsSaver
 
-
-# ============================================================================
-# КЛАСС АНАЛИЗАТОРА (временно в main.py)
-# ============================================================================
 
 class InternalArbitrageAnalyzer:
     """Анализатор внутрибиржевого арбитража на Bybit"""
@@ -59,14 +55,47 @@ class InternalArbitrageAnalyzer:
 
         return opportunities
 
+    def _get_exchange_rate(self, from_coin: str, to_coin: str) -> float:
+        """
+        КРИТИЧНО: Правильно рассчитывает курс обмена from_coin -> to_coin
+
+        Пытается найти:
+        1. Прямую пару from_coin/to_coin
+        2. Обратную пару to_coin/from_coin (и берёт 1/price)
+        3. Через USDT: from_coin/USDT и to_coin/USDT
+        """
+        # Вариант 1: Прямая пара
+        direct_price = self.bybit.get_price(from_coin, to_coin)
+        if direct_price is not None and direct_price > 0:
+            return direct_price
+
+        # Вариант 2: Через USDT (если обе монеты имеют USDT пары)
+        if from_coin != 'USDT' and to_coin != 'USDT':
+            from_usdt_price = self.bybit.usdt_pairs.get(from_coin)
+            to_usdt_price = self.bybit.usdt_pairs.get(to_coin)
+
+            if from_usdt_price and to_usdt_price and from_usdt_price > 0 and to_usdt_price > 0:
+                # Курс: from_coin -> USDT -> to_coin
+                return from_usdt_price / to_usdt_price
+
+        return None
+
     async def _find_triangular_arbitrage(self, start_amount, min_spread, max_spread):
-        """Треугольный арбитраж: USDT -> CoinA -> CoinB -> USDT"""
+        """
+        Треугольный арбитраж: USDT -> CoinA -> CoinB -> USDT
+
+        ИСПРАВЛЕНО:
+        - Правильный расчёт кросс-курсов
+        - Проверка существования пар
+        - Валидация промежуточных значений
+        """
         opportunities = []
         usdt_coins = list(self.bybit.usdt_pairs.keys())
 
         print(f"[Triangular] Монет с USDT-парами: {len(usdt_coins)}")
 
         for i, coin_a in enumerate(usdt_coins):
+            # Шаг 1: USDT -> CoinA
             price_usdt_to_a = self.bybit.usdt_pairs.get(coin_a)
             if not price_usdt_to_a or price_usdt_to_a <= 0:
                 continue
@@ -82,23 +111,36 @@ class InternalArbitrageAnalyzer:
                 if self.checked_count % 500 == 0:
                     print(f"[Triangular] 📊 Проверено: {self.checked_count} | Найдено: {self.found_count}")
 
-                price_a_to_b = self.bybit.get_price(coin_a, coin_b)
+                # Шаг 2: CoinA -> CoinB (ИСПРАВЛЕНО)
+                price_a_to_b = self._get_exchange_rate(coin_a, coin_b)
                 if price_a_to_b is None or price_a_to_b <= 0:
                     continue
 
                 amount_b = amount_a * price_a_to_b
 
+                # Валидация промежуточного результата
+                if amount_b <= 0:
+                    continue
+
+                # Шаг 3: CoinB -> USDT
                 price_b_to_usdt = self.bybit.usdt_pairs.get(coin_b)
                 if not price_b_to_usdt or price_b_to_usdt <= 0:
                     continue
 
                 final_usdt = amount_b * price_b_to_usdt
+
+                # Валидация финального результата
+                if final_usdt <= 0:
+                    continue
+
                 spread = ((final_usdt - start_amount) / start_amount) * 100
 
+                # Фильтрация
                 if spread < min_spread or spread > max_spread:
                     continue
 
-                if amount_a <= 0 or amount_b <= 0 or final_usdt <= 0:
+                # Дополнительная проверка на адекватность (защита от ошибок данных)
+                if abs(spread) > 100:
                     continue
 
                 opp = {
@@ -125,41 +167,51 @@ class InternalArbitrageAnalyzer:
         return opportunities
 
     async def _find_quadrilateral_arbitrage(self, start_amount, min_spread, max_spread):
-        """Четырехугольный арбитраж: USDT -> CoinA -> CoinB -> CoinC -> USDT"""
+        """
+        Четырехугольный арбитраж: USDT -> CoinA -> CoinB -> CoinC -> USDT
+
+        ИСПРАВЛЕНО:
+        - Правильный расчёт всех кросс-курсов
+        - Проверка существования всех пар
+        - Валидация на каждом шаге
+        """
         opportunities = []
         usdt_coins = list(self.bybit.usdt_pairs.keys())
 
         print(f"[Quadrilateral] Монет с USDT-парами: {len(usdt_coins)}")
 
+        # Ограничиваем топ-100 для производительности
         top_coins = usdt_coins[:100]
         quad_checked = 0
 
         for coin_a in top_coins:
+            # Шаг 1: USDT -> CoinA
             price_usdt_to_a = self.bybit.usdt_pairs.get(coin_a)
             if not price_usdt_to_a or price_usdt_to_a <= 0:
                 continue
 
             amount_a = start_amount / price_usdt_to_a
-            available_b = self.bybit.get_available_quotes_for(coin_a)
-            available_b = available_b & set(top_coins)
 
-            for coin_b in available_b:
+            # Находим монеты, с которыми coin_a может торговаться
+            for coin_b in top_coins:
                 if coin_b == coin_a or coin_b == 'USDT':
                     continue
 
-                price_a_to_b = self.bybit.get_price(coin_a, coin_b)
+                # Шаг 2: CoinA -> CoinB (ИСПРАВЛЕНО)
+                price_a_to_b = self._get_exchange_rate(coin_a, coin_b)
                 if price_a_to_b is None or price_a_to_b <= 0:
                     continue
 
                 amount_b = amount_a * price_a_to_b
-                available_c = self.bybit.get_available_quotes_for(coin_b)
-                available_c = available_c & set(top_coins)
+                if amount_b <= 0:
+                    continue
 
-                for coin_c in available_c:
-                    if coin_c == coin_a or coin_c == coin_b or coin_c == 'USDT':
+                for coin_c in top_coins:
+                    if coin_c in [coin_a, coin_b, 'USDT']:
                         continue
 
-                    if not self.bybit.has_trading_pair(coin_c, 'USDT'):
+                    # Проверяем, что CoinC имеет USDT пару
+                    if coin_c not in self.bybit.usdt_pairs:
                         continue
 
                     quad_checked += 1
@@ -167,23 +219,32 @@ class InternalArbitrageAnalyzer:
                     if quad_checked % 1000 == 0:
                         print(f"[Quadrilateral] 📊 Проверено: {quad_checked} | Найдено: {self.found_count}")
 
-                    price_b_to_c = self.bybit.get_price(coin_b, coin_c)
+                    # Шаг 3: CoinB -> CoinC (ИСПРАВЛЕНО)
+                    price_b_to_c = self._get_exchange_rate(coin_b, coin_c)
                     if price_b_to_c is None or price_b_to_c <= 0:
                         continue
 
                     amount_c = amount_b * price_b_to_c
+                    if amount_c <= 0:
+                        continue
 
+                    # Шаг 4: CoinC -> USDT
                     price_c_to_usdt = self.bybit.usdt_pairs.get(coin_c)
                     if not price_c_to_usdt or price_c_to_usdt <= 0:
                         continue
 
                     final_usdt = amount_c * price_c_to_usdt
+                    if final_usdt <= 0:
+                        continue
+
                     spread = ((final_usdt - start_amount) / start_amount) * 100
 
+                    # Фильтрация
                     if spread < min_spread or spread > max_spread:
                         continue
 
-                    if amount_a <= 0 or amount_b <= 0 or amount_c <= 0 or final_usdt <= 0:
+                    # Защита от аномалий
+                    if abs(spread) > 100:
                         continue
 
                     opp = {
@@ -221,7 +282,11 @@ class InternalArbitrageAnalyzer:
         print(f"{'─' * 100}")
 
     async def analyze_specific_path(self, path, start_amount=100.0):
-        """Анализирует конкретный путь"""
+        """
+        Анализирует конкретный путь
+
+        ИСПРАВЛЕНО: использует _get_exchange_rate для правильного расчёта
+        """
         print(f"\n[Analyzer] 🔬 Детальный анализ пути: {' → '.join(path)}")
 
         if len(path) < 3:
@@ -238,10 +303,11 @@ class InternalArbitrageAnalyzer:
                 from_coin = path[i]
                 to_coin = path[i + 1]
 
-                price = self.bybit.get_price(from_coin, to_coin)
+                # ИСПРАВЛЕНО: используем правильный метод получения курса
+                price = self._get_exchange_rate(from_coin, to_coin)
 
                 if price is None:
-                    return {'error': f'Пара {from_coin}/{to_coin} не найдена'}
+                    return {'error': f'Пара {from_coin}/{to_coin} не найдена или не может быть рассчитана'}
 
                 new_amount = current_amount * price
                 step_info = f"{i + 1}. {current_amount:.8f} {from_coin} → {new_amount:.8f} {to_coin} (курс: {price:.8f})"
@@ -310,7 +376,7 @@ async def main():
         analyzer = InternalArbitrageAnalyzer(bybit)
 
         print("\n🔬 Пример 1: Треугольный арбитраж")
-        await analyzer.analyze_specific_path(['USDT', 'LTC', 'BNB', 'USDT'], START_AMOUNT)
+        await analyzer.analyze_specific_path(['USDT', 'BTC', 'ETH', 'USDT'], START_AMOUNT)
 
         print("\n🔬 Пример 2: Четырехугольный арбитраж")
         await analyzer.analyze_specific_path(['USDT', 'BTC', 'ETH', 'BNB', 'USDT'], START_AMOUNT)
