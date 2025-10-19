@@ -17,7 +17,7 @@ from configs import (
 class RateInfo:
     """Информация о курсе обмена"""
     rate: float
-    rankrate: float  # Курс с учетом комиссий для $300
+    rankrate: float  # Курс с учетом комиссий для $300 (в формате GIVE)
     exchanger: str
     exchanger_id: int
     reserve: float
@@ -27,7 +27,7 @@ class RateInfo:
 
 
 class BestChangeClientAsync:
-    """Асинхронный клиент для BestChange API v2.0 с оптимизированной загрузкой"""
+    """Асинхронный клиент для BestChange API v2.0 с правильной обработкой курсов GET/GIVE"""
 
     def __init__(self):
         if not BESTCHANGE_API_KEY:
@@ -46,7 +46,7 @@ class BestChangeClientAsync:
         # Настройки из конфига с валидацией
         self.max_concurrent_requests = max(1, min(MAX_CONCURRENT_REQUESTS, 10))
         self.request_delay = max(0.1, REQUEST_DELAY)
-        self.batch_size = max(1, min(BATCH_SIZE, 500))  # Максимум 500 согласно документации
+        self.batch_size = max(1, min(BATCH_SIZE, 500))
         self.max_retries = max(1, MAX_RETRIES)
         self.retry_delay = max(1, RETRY_DELAY)
 
@@ -60,7 +60,7 @@ class BestChangeClientAsync:
 
         # Для отслеживания последнего запроса (rate limiting)
         self._last_request_time = 0
-        self._min_request_interval = 0.05  # Минимум 50ms между запросами
+        self._min_request_interval = 0.05
 
     async def __aenter__(self):
         await self.create_session()
@@ -116,16 +116,12 @@ class BestChangeClientAsync:
 
         for attempt in range(retries + 1):
             try:
-                # Умная задержка перед запросом
                 await self._rate_limit_wait()
-
                 self.request_count += 1
 
                 async with self.session.get(url) as response:
-                    # Обработка rate limit
                     if response.status == 429:
                         self.rate_limit_count += 1
-                        # Экспоненциальный backoff с jitter
                         wait_time = self.retry_delay * (2 ** attempt) * (0.5 + 0.5 * (attempt / retries))
 
                         if attempt < retries:
@@ -138,9 +134,8 @@ class BestChangeClientAsync:
                             print(f"[BestChange] ❌ Превышен лимит попыток для {endpoint}")
                             return None
 
-                    # Обработка других HTTP ошибок
                     if response.status == 404:
-                        return None  # Нет данных для этого endpoint
+                        return None
 
                     if response.status >= 400:
                         if attempt < retries:
@@ -150,7 +145,6 @@ class BestChangeClientAsync:
                         print(f"[BestChange] ❌ HTTP {response.status} для {endpoint}")
                         return None
 
-                    # Успешный ответ
                     try:
                         data = await response.json()
                         return data
@@ -207,7 +201,6 @@ class BestChangeClientAsync:
                 'group': currency.get('group', 0)
             }
 
-            # Индексируем криптовалюты по коду
             if currency.get('crypto', False) and code:
                 self.crypto_currencies[code] = currency_id
 
@@ -249,7 +242,12 @@ class BestChangeClientAsync:
 
     async def load_rates(self, common_tickers: List[str], use_rankrate: bool = True):
         """
-        Загрузка курсов с прогресс-баром
+        Загрузка курсов с правильной обработкой GET/GIVE
+
+        КРИТИЧНО: BestChange API возвращает курсы в формате GIVE (сколько отдать FROM за 1 TO)
+        Для получения GET курса (сколько получить TO за 1 FROM) нужно инвертировать: 1/rate
+
+        После инверсии курсы сортируются по убыванию (лучшие GET курсы сверху)
 
         Args:
             common_tickers: Список тикеров для загрузки
@@ -267,8 +265,8 @@ class BestChangeClientAsync:
         print(f"  • Задержка между запросами: {self.request_delay}с")
         print(f"  • Размер батча: {self.batch_size} пар")
         print(f"  • Использовать rankrate: {'Да' if use_rankrate else 'Нет'}")
+        print(f"  ⚠️  ВНИМАНИЕ: Курсы будут отсортированы по GET (получение) - по убыванию")
 
-        # Фильтруем только существующие криптовалюты
         valid_tickers = [
             ticker for ticker in common_tickers
             if ticker in self.crypto_currencies
@@ -277,7 +275,6 @@ class BestChangeClientAsync:
         if len(valid_tickers) < len(common_tickers):
             print(f"[BestChange] ⚠️  Пропущено {len(common_tickers) - len(valid_tickers)} неизвестных тикеров")
 
-        # Создаем задачи для каждой монеты
         tasks = []
         for ticker in valid_tickers:
             currency_id = self.crypto_currencies[ticker]
@@ -285,7 +282,6 @@ class BestChangeClientAsync:
                 self._load_rates_for_currency(ticker, currency_id, valid_tickers, use_rankrate)
             )
 
-        # Семафор для ограничения параллелизма
         semaphore = asyncio.Semaphore(self.max_concurrent_requests)
         completed = 0
         successful = 0
@@ -299,19 +295,15 @@ class BestChangeClientAsync:
                 if result:
                     successful += 1
 
-                # Прогресс-бар
                 if completed % 5 == 0 or completed == len(tasks):
                     progress = completed * 100 // len(tasks)
                     print(f"[BestChange] 📊 Прогресс: {completed}/{len(tasks)} ({progress}%) | Успешно: {successful}")
 
-                # Динамическая задержка между батчами
                 await asyncio.sleep(self.request_delay)
                 return result
 
-        # Запускаем все задачи
         results = await asyncio.gather(*[bounded_task(t) for t in tasks], return_exceptions=True)
 
-        # Обрабатываем результаты
         for result in results:
             if isinstance(result, Exception):
                 self.error_count += 1
@@ -320,7 +312,6 @@ class BestChangeClientAsync:
                 from_ticker, pairs = result
                 self.rates[from_ticker] = pairs
 
-        # Финальная статистика
         print(f"\n[BestChange] 📈 Статистика загрузки:")
         print(f"  • Всего запросов: {self.request_count}")
         print(f"  • Успешных монет: {successful}/{len(tasks)}")
@@ -336,20 +327,19 @@ class BestChangeClientAsync:
             use_rankrate: bool
     ) -> Optional[Tuple[str, Dict[str, List[RateInfo]]]]:
         """
-        Загружает курсы для одной валюты
+        Загружает курсы для одной валюты с правильной обработкой GIVE->GET
 
-        Оптимизированный алгоритм:
-        1. Получаем presences для определения доступных пар
-        2. Загружаем rates батчами для всех доступных пар
-        3. Парсим и сортируем результаты
+        КРИТИЧНО:
+        1. BestChange возвращает rate/rankrate в формате GIVE (сколько отдать FROM за 1 TO)
+        2. Мы НЕ инвертируем значения при сохранении в RateInfo
+        3. Инверсия происходит только при сортировке
+        4. Это позволяет сохранить оригинальные данные API
         """
         try:
-            # Шаг 1: Получаем presences (доступные направления обмена)
             presences = await self._make_request(f"presences/{from_id}-0")
             if not presences or 'presences' not in presences:
                 return None
 
-            # Фильтруем только нужные нам пары
             pair_list = []
             valid_targets = {}
 
@@ -365,13 +355,11 @@ class BestChangeClientAsync:
                 except ValueError:
                     continue
 
-                # Проверяем что целевая валюта существует и есть в списке
                 if to_id not in self.currencies:
                     continue
 
                 to_code = self.currencies[to_id]['code']
 
-                # Только криптовалюты из нашего списка
                 if to_code in common_tickers and from_ticker != to_code:
                     pair_list.append(pair_id)
                     valid_targets[to_id] = to_code
@@ -381,12 +369,10 @@ class BestChangeClientAsync:
 
             pairs: Dict[str, List[RateInfo]] = {}
 
-            # Шаг 2: Загружаем курсы батчами
             for i in range(0, len(pair_list), self.batch_size):
                 batch = pair_list[i:i + self.batch_size]
                 pair_string = '+'.join(batch)
 
-                # Небольшая задержка между батчами одной валюты
                 if i > 0:
                     await asyncio.sleep(self.request_delay * 0.3)
 
@@ -395,7 +381,6 @@ class BestChangeClientAsync:
                 if not rates_data or 'rates' not in rates_data:
                     continue
 
-                # Парсим курсы из ответа
                 for pair_id, rates_list in rates_data['rates'].items():
                     parts = pair_id.split('-')
                     if len(parts) < 2:
@@ -413,27 +398,24 @@ class BestChangeClientAsync:
                     if to_code not in pairs:
                         pairs[to_code] = []
 
-                    # Обрабатываем каждое предложение обменника
                     for rate_data in rates_list:
                         try:
                             rate = float(rate_data.get('rate', 0))
                             rankrate = float(rate_data.get('rankrate', rate))
 
-                            # Используем rankrate если включено (более точный курс)
-                            effective_rate = rankrate if use_rankrate else rate
-
-                            if effective_rate <= 0:
+                            if rate <= 0 or rankrate <= 0:
                                 continue
 
                             exchanger_id = rate_data['changer']
 
-                            # Получаем информацию об обменнике
                             exchanger_info = self.changers.get(exchanger_id, {})
                             if not exchanger_info.get('active', False):
-                                continue  # Пропускаем неактивные обменники
+                                continue
 
                             exchanger_name = exchanger_info.get('name', f"Exchanger #{exchanger_id}")
 
+                            # ВАЖНО: Сохраняем оригинальные значения rate и rankrate (GIVE формат)
+                            # Инверсия будет происходить при использовании этих значений
                             rate_info = RateInfo(
                                 rate=rate,
                                 rankrate=rankrate,
@@ -447,15 +429,16 @@ class BestChangeClientAsync:
 
                             pairs[to_code].append(rate_info)
 
-                        except (ValueError, TypeError, KeyError) as e:
-                            # Пропускаем невалидные записи
+                        except (ValueError, TypeError, KeyError):
                             continue
 
-            # Сортируем по эффективному курсу (rankrate или rate)
+            # КРИТИЧНО: Сортируем по GET курсу (инвертированному) по убыванию
+            # Лучшие курсы (больше получаем) будут сверху
             for to_code in pairs:
                 pairs[to_code].sort(
-                    key=lambda x: x.rankrate if use_rankrate else x.rate,
-                    reverse=True
+                    key=lambda x: (1.0 / x.rankrate) if use_rankrate and x.rankrate > 0 else (
+                                1.0 / x.rate) if x.rate > 0 else 0,
+                    reverse=True  # От большего к меньшему (лучшие GET курсы сверху)
                 )
 
             return (from_ticker, pairs) if pairs else None
@@ -483,13 +466,18 @@ class BestChangeClientAsync:
         """
         Получает лучший курс для пары с учетом минимального резерва
 
+        ВАЖНО: Возвращает RateInfo с rankrate/rate в формате GIVE (сколько отдать FROM за 1 TO)
+        Для получения курса GET (сколько получить TO за 1 FROM) нужно инвертировать: 1/rankrate
+
+        Список уже отсортирован по GET курсу (по убыванию), поэтому первый элемент - лучший
+
         Args:
             from_ticker: Тикер исходной валюты
             to_ticker: Тикер целевой валюты
             min_reserve: Минимальный резерв обменника
 
         Returns:
-            Лучший RateInfo или None
+            Лучший RateInfo (отсортирован по GET курсу - по убыванию) или None
         """
         if from_ticker not in self.rates:
             return None
@@ -499,7 +487,6 @@ class BestChangeClientAsync:
 
         rates = self.rates[from_ticker][to_ticker]
 
-        # Фильтруем по минимальному резерву
         if min_reserve > 0:
             rates = [r for r in rates if r.reserve >= min_reserve]
 
@@ -522,7 +509,7 @@ class BestChangeClientAsync:
             min_reserve: Минимальный резерв обменника
 
         Returns:
-            Список из топ N RateInfo
+            Список из топ N RateInfo (отсортированы по GET курсу)
         """
         if from_ticker not in self.rates:
             return []
@@ -532,7 +519,6 @@ class BestChangeClientAsync:
 
         rates = self.rates[from_ticker][to_ticker]
 
-        # Фильтруем по минимальному резерву
         if min_reserve > 0:
             rates = [r for r in rates if r.reserve >= min_reserve]
 

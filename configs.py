@@ -12,7 +12,7 @@ if ENV_PATH.exists():
 # ОСНОВНЫЕ ПАРАМЕТРЫ АНАЛИЗА
 # ============================================================================
 START_AMOUNT = float(os.getenv("START_AMOUNT", 100.0))
-MIN_SPREAD = float(os.getenv("MIN_SPREAD", 0.5))
+MIN_SPREAD = float(os.getenv("MIN_SPREAD", -1.1))
 MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", 0.5))  # Минимальная прибыль в долларах
 SHOW_TOP = int(os.getenv("SHOW_TOP", 10))
 

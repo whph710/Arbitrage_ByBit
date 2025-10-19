@@ -9,6 +9,9 @@ class ExchangeArbitrageAnalyzer:
     """
     Оптимизированный анализатор арбитража через обменники (BestChange)
     Схема: Bybit (купить A) → BestChange (обменять A→B) → Bybit (продать B)
+
+    КРИТИЧНО: BestChange API возвращает курсы GIVE (сколько отдать),
+    мы инвертируем их в GET (сколько получить)
     """
 
     def __init__(self, bybit_client, bestchange_client):
@@ -177,6 +180,9 @@ class ExchangeArbitrageAnalyzer:
         """
         Проверяет одну пару монет (ПОЛНОСТЬЮ ИСПРАВЛЕНО)
         Схема: USDT → CoinA (Bybit) → CoinB (BestChange) → USDT (Bybit)
+
+        КРИТИЧНО: BestChange возвращает GIVE курс (сколько отдать CoinA за 1 CoinB)
+        Мы инвертируем его в GET курс: exchange_rate = 1 / give_rate
         """
         try:
             # Получаем цены на Bybit
@@ -193,29 +199,15 @@ class ExchangeArbitrageAnalyzer:
             if not best_rate:
                 return None
 
-            raw_rate = best_rate.rankrate
-            if raw_rate <= 0:
+            # КРИТИЧНО: BestChange даёт курс "GIVE" (сколько отдать FROM за 1 TO)
+            # Нам нужен курс "GET" (сколько получить TO за 1 FROM)
+            # Поэтому инвертируем: exchange_rate = 1 / give_rate
+            give_rate = best_rate.rankrate
+            if give_rate <= 0:
                 return None
 
-            # КРИТИЧНАЯ ЛОГИКА: Определяем правильное направление курса
-            # BestChange может вернуть курс в любом направлении
-
-            # Вычисляем ожидаемый курс на основе цен Bybit
-            # Сколько coin_b получим за 1 coin_a
-            expected_rate = price_a_usdt / price_b_usdt
-
-            # Сравниваем с курсом от BestChange
-            # Если они сильно отличаются (> 50%), значит курс обратный
-            rate_ratio = raw_rate / expected_rate if expected_rate > 0 else 0
-
-            # Если отношение близко к 1 (0.5-2.0), курс правильный
-            # Если отношение далеко от 1, нужно инвертировать
-            if 0.5 <= rate_ratio <= 2.0:
-                # Курс в правильном направлении
-                exchange_rate = raw_rate
-            else:
-                # Курс обратный, инвертируем
-                exchange_rate = 1.0 / raw_rate if raw_rate > 0 else 0
+            # Инвертируем для получения правильного курса обмена
+            exchange_rate = 1.0 / give_rate
 
             if exchange_rate <= 0:
                 return None
@@ -225,6 +217,7 @@ class ExchangeArbitrageAnalyzer:
             amount_coin_a = start_amount / price_a_usdt
 
             # Шаг 2: Обмениваем coin_a на coin_b через BestChange
+            # exchange_rate = сколько coin_b получим за 1 coin_a
             amount_coin_b = amount_coin_a * exchange_rate
 
             # Шаг 3: Продаём coin_b за USDT на Bybit
@@ -270,15 +263,13 @@ class ExchangeArbitrageAnalyzer:
                 'steps': [
                     f"1️⃣  Купить {amount_coin_a:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (${price_a_usdt:.8f})",
                     f"2️⃣  Перевести {amount_coin_a:.8f} {coin_a} с Bybit на {best_rate.exchanger}",
-                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} (курс: 1 {coin_a} = {exchange_rate:.8f} {coin_b})",
+                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} (курс GET: 1 {coin_a} = {exchange_rate:.8f} {coin_b})",
                     f"4️⃣  Перевести {amount_coin_b:.8f} {coin_b} с обменника на Bybit",
                     f"5️⃣  Продать {amount_coin_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (${price_b_usdt:.8f})",
                     f"✅ ИТОГ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{profit:.2f} USDT, {spread:.4f}%)"
                 ],
-                'exchange_rate': exchange_rate,  # ИСПРАВЛЕННЫЙ курс
-                'raw_bestchange_rate': raw_rate,
-                'expected_rate': expected_rate,
-                'rate_was_inverted': rate_ratio < 0.5 or rate_ratio > 2.0,
+                'exchange_rate': exchange_rate,  # GET курс (сколько получаем)
+                'give_rate': give_rate,  # GIVE курс (из BestChange)
                 'bybit_rate_a': price_a_usdt,
                 'bybit_rate_b': price_b_usdt,
                 'timestamp': datetime.now().isoformat()
@@ -295,8 +286,7 @@ class ExchangeArbitrageAnalyzer:
         print(f"   🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")
         print(
             f"   💧 Ликвидность: {opp['coins'][0]} ({opp['liquidity_a']:.1f}) → {opp['coins'][1]} ({opp['liquidity_b']:.1f})")
-        if opp.get('rate_was_inverted'):
-            print(f"   ⚠️  Курс был инвертирован: {opp['raw_bestchange_rate']:.8f} → {opp['exchange_rate']:.8f}")
+        print(f"   📊 Курс GET: 1 {opp['coins'][0]} = {opp['exchange_rate']:.8f} {opp['coins'][1]}")
         print("-" * 100)
 
     def _update_hot_pairs_cache(self, opportunities: List[Dict]):
@@ -340,12 +330,15 @@ class ExchangeArbitrageAnalyzer:
 
             print(f"   ✓ Найдено {len(top_rates)} обменников:")
             for idx, rate in enumerate(top_rates, 1):
-                amount_b = amount_coin_a * rate.rankrate
+                # Инвертируем GIVE курс в GET курс
+                get_rate = 1.0 / rate.rankrate if rate.rankrate > 0 else 0
+                amount_b = amount_coin_a * get_rate
                 print(
-                    f"      {idx}. {rate.exchanger}: курс 1 {coin_a} = {rate.rankrate:.8f} {coin_b} → {amount_b:.8f} {coin_b} (резерв: ${rate.reserve:,.0f})")
+                    f"      {idx}. {rate.exchanger}: курс GET 1 {coin_a} = {get_rate:.8f} {coin_b} → {amount_b:.8f} {coin_b} (резерв: ${rate.reserve:,.0f})")
 
             best_rate = top_rates[0]
-            amount_coin_b = amount_coin_a * best_rate.rankrate
+            get_rate = 1.0 / best_rate.rankrate if best_rate.rankrate > 0 else 0
+            amount_coin_b = amount_coin_a * get_rate
 
             price_b_usdt = self.bybit.usdt_pairs.get(coin_b)
             if not price_b_usdt:
@@ -367,7 +360,7 @@ class ExchangeArbitrageAnalyzer:
                 'final_usdt': final_usdt,
                 'exchanger': best_rate.exchanger,
                 'top_exchangers': [
-                    {'name': r.exchanger, 'rate': r.rankrate, 'reserve': r.reserve}
+                    {'name': r.exchanger, 'rate': 1.0 / r.rankrate if r.rankrate > 0 else 0, 'reserve': r.reserve}
                     for r in top_rates
                 ]
             }
