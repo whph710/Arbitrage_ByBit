@@ -95,7 +95,8 @@ class ResultsSaver:
 
                 type_names = {
                     'triangular': '🔺 Треугольный (3 сделки)',
-                    'quadrilateral': '🔶 Четырехугольный (4 сделки)'
+                    'quadrilateral': '🔶 Четырехугольный (4 сделки)',
+                    'bestchange_arbitrage': '🔀 Через BestChange'
                 }
 
                 for opp_type, stats in sorted(types_stats.items(), key=lambda x: x[1]['max_spread'], reverse=True):
@@ -113,7 +114,7 @@ class ResultsSaver:
                 f.write("=" * 100 + "\n\n")
 
                 for idx, opp in enumerate(opportunities, 1):
-                    icon = "🔺" if opp['type'] == 'triangular' else "🔶"
+                    icon = "🔺" if opp['type'] == 'triangular' else ("🔶" if opp['type'] == 'quadrilateral' else "🔀")
                     f.write(f"{icon} #{idx} | Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}\n")
                     f.write(f"    Тип: {opp.get('type', 'N/A')}\n")
                     f.write(f"    Схема: {opp['scheme']}\n")
@@ -177,17 +178,97 @@ class ResultsSaver:
                     steps
                 ])
 
+    def _extract_rates_from_opportunity(self, opp: Dict) -> List[Dict]:
+        """Извлекает курсы из возможности арбитража"""
+        rates = []
+        path_parts = opp['path'].split(' → ')
+
+        # Для треугольного арбитража: USDT → A → B → USDT
+        if opp['type'] == 'triangular' and len(path_parts) == 4:
+            coin_a = path_parts[1]
+            coin_b = path_parts[2]
+
+            # Извлекаем курсы из steps
+            for step in opp['steps']:
+                if 'курс:' in step or '(' in step:
+                    if coin_a in step and 'USDT' in step and 'Купить' in step:
+                        # USDT -> A
+                        rate_str = step.split('$')[1].split(')')[0] if '$' in step else \
+                        step.split('курс:')[1].split(')')[0] if 'курс:' in step else '0'
+                        rates.append({
+                            'from': 'USDT',
+                            'to': coin_a,
+                            'rate': float(rate_str.strip())
+                        })
+                    elif coin_a in step and coin_b in step:
+                        # A -> B
+                        rate_str = step.split('курс:')[1].split(')')[0] if 'курс:' in step else '0'
+                        rates.append({
+                            'from': coin_a,
+                            'to': coin_b,
+                            'rate': float(rate_str.strip())
+                        })
+                    elif coin_b in step and 'USDT' in step and 'Продать' in step:
+                        # B -> USDT
+                        rate_str = step.split('$')[1].split(')')[0] if '$' in step else \
+                        step.split('курс:')[1].split(')')[0] if 'курс:' in step else '0'
+                        rates.append({
+                            'from': coin_b,
+                            'to': 'USDT',
+                            'rate': float(rate_str.strip())
+                        })
+
+        # Для четырехугольного: USDT → A → B → C → USDT
+        elif opp['type'] == 'quadrilateral' and len(path_parts) == 5:
+            coin_a = path_parts[1]
+            coin_b = path_parts[2]
+            coin_c = path_parts[3]
+
+            for step in opp['steps']:
+                if 'Купить' in step and coin_a in step:
+                    rate_str = step.split('за')[1].split('USDT')[0].strip()
+                    rates.append({'from': 'USDT', 'to': coin_a, 'rate': float(opp['initial']) / float(
+                        step.split('Купить')[1].split(coin_a)[0].strip())})
+                elif coin_a in step and coin_b in step:
+                    rates.append({'from': coin_a, 'to': coin_b, 'rate': 0})  # Нужно извлечь
+                elif coin_b in step and coin_c in step:
+                    rates.append({'from': coin_b, 'to': coin_c, 'rate': 0})
+                elif 'Продать' in step and coin_c in step:
+                    rates.append({'from': coin_c, 'to': 'USDT', 'rate': 0})
+
+        # Для BestChange арбитража
+        elif opp['type'] == 'bestchange_arbitrage':
+            path_parts = opp['path'].split(' → ')
+            if len(path_parts) >= 3:
+                coin_a = path_parts[1]
+                coin_b = path_parts[2]
+
+                for step in opp['steps']:
+                    if 'Купить' in step and coin_a in step and '$' in step:
+                        rate_str = step.split('$')[1].split(')')[0]
+                        rates.append({'from': 'USDT', 'to': coin_a, 'rate': float(rate_str)})
+                    elif 'Обменять' in step and 'курс:' in step:
+                        rate_str = step.split('курс:')[1].split(')')[0]
+                        rates.append({'from': coin_a, 'to': coin_b, 'rate': float(rate_str)})
+                    elif 'Продать' in step and coin_b in step and '$' in step:
+                        rate_str = step.split('$')[1].split(')')[0]
+                        rates.append({'from': coin_b, 'to': 'USDT', 'rate': float(rate_str)})
+
+        return rates
+
     def _save_html(self, path: Path, opportunities: List[Dict], metadata: Dict):
-        """Сохранение в HTML формате с красивым оформлением"""
+        """Сохранение в HTML формате с редактируемыми курсами"""
 
         type_names = {
             'triangular': '🔺 Треугольный',
-            'quadrilateral': '🔶 Четырехугольный'
+            'quadrilateral': '🔶 Четырехугольный',
+            'bestchange_arbitrage': '🔀 Через BestChange'
         }
 
         type_colors = {
             'triangular': '#28a745',
-            'quadrilateral': '#fd7e14'
+            'quadrilateral': '#fd7e14',
+            'bestchange_arbitrage': '#17a2b8'
         }
 
         html_content = f"""<!DOCTYPE html>
@@ -195,7 +276,7 @@ class ResultsSaver:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Internal Arbitrage Results - {metadata['timestamp']}</title>
+    <title>Arbitrage Results - {metadata['timestamp']}</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f5f5; padding: 20px; }}
@@ -215,7 +296,15 @@ class ResultsSaver:
         .profit {{ font-size: 18px; color: #28a745; }}
         .type-badge {{ display: inline-block; padding: 5px 15px; color: white; border-radius: 20px; font-size: 12px; margin-left: 10px; }}
         .scheme-badge {{ display: inline-block; padding: 5px 15px; background: #6c757d; color: white; border-radius: 20px; font-size: 11px; }}
-        .path {{ font-weight: bold; color: #333; margin: 10px 0; }}
+        .path-container {{ margin: 15px 0; padding: 15px; background: white; border-radius: 5px; }}
+        .path-item {{ display: inline-flex; align-items: center; margin: 5px 0; }}
+        .coin {{ font-weight: bold; color: #333; padding: 5px 10px; background: #e9ecef; border-radius: 3px; }}
+        .arrow-container {{ margin: 0 10px; display: inline-flex; flex-direction: column; align-items: center; }}
+        .arrow {{ font-size: 20px; color: #667eea; }}
+        .rate-input {{ width: 120px; padding: 5px 8px; border: 2px solid #667eea; border-radius: 4px; text-align: center; font-size: 14px; font-weight: bold; }}
+        .rate-input:focus {{ outline: none; border-color: #764ba2; background: #f0f8ff; }}
+        .result-box {{ margin-top: 15px; padding: 15px; background: #d4edda; border: 2px solid #28a745; border-radius: 5px; }}
+        .result-value {{ font-size: 18px; font-weight: bold; color: #155724; }}
         .steps {{ margin-top: 15px; padding-left: 20px; }}
         .step {{ padding: 8px 0; border-bottom: 1px solid #e0e0e0; }}
         .step:last-child {{ border-bottom: none; }}
@@ -228,8 +317,8 @@ class ResultsSaver:
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Crypto Arbitrage Bot v6.0 — Внутрибиржевой арбитраж на Bybit</h1>
-            <p>Треугольный и четырехугольный арбитраж</p>
+            <h1>🚀 Crypto Arbitrage Bot v7.0</h1>
+            <p>Интерактивный анализ арбитражных возможностей</p>
         </div>
 
         <div class="metadata">
@@ -290,12 +379,38 @@ class ResultsSaver:
                 type_name = type_names.get(opp_type, opp_type)
                 color = type_colors.get(opp_type, '#6c757d')
 
+                # Парсим путь
+                path_parts = opp['path'].split(' → ')
+                rates = self._extract_rates_from_opportunity(opp)
+
+                # Создаем интерактивный путь с редактируемыми курсами
+                path_html = '<div class="path-container"><div style="font-weight: bold; margin-bottom: 10px;">Путь с курсами обмена:</div>'
+
+                for i, part in enumerate(path_parts):
+                    path_html += f'<span class="coin">{part}</span>'
+                    if i < len(path_parts) - 1:
+                        rate_val = rates[i]['rate'] if i < len(rates) else 0
+                        path_html += f'''
+                        <div class="arrow-container">
+                            <div class="arrow">↓</div>
+                            <input type="number" 
+                                   class="rate-input" 
+                                   data-opp-id="{idx}" 
+                                   data-rate-index="{i}"
+                                   value="{rate_val:.8f}" 
+                                   step="0.00000001"
+                                   onchange="recalculate({idx})">
+                        </div>
+                        '''
+
+                path_html += '</div>'
+
                 steps_html = ""
                 for step in opp['steps']:
                     steps_html += f'<div class="step">{step}</div>'
 
                 html_content += f"""
-            <div class="opportunity" style="border-left: 4px solid {color};">
+            <div class="opportunity" style="border-left: 4px solid {color};" id="opp-{idx}">
                 <div class="opportunity-header">
                     <div>
                         <span class="opportunity-rank">#{idx}</span>
@@ -303,22 +418,86 @@ class ResultsSaver:
                         <span class="scheme-badge">{opp['scheme']}</span>
                     </div>
                     <div>
-                        <span class="spread">{opp['spread']:.4f}%</span>
-                        <span class="profit"> | Прибыль: ${opp['profit']:.4f}</span>
+                        <span class="spread" id="spread-{idx}">{opp['spread']:.4f}%</span>
+                        <span class="profit" id="profit-{idx}"> | Прибыль: ${opp['profit']:.4f}</span>
                     </div>
                 </div>
-                <div class="path">Путь: {opp['path']}</div>
-                <div style="margin: 10px 0; color: #666;">
-                    ${opp['initial']:.2f} → ${opp['final']:.2f}
+
+                {path_html}
+
+                <div class="result-box">
+                    <div class="result-value" id="result-{idx}">
+                        ${opp['initial']:.2f} → $<span id="final-{idx}">{opp['final']:.2f}</span>
+                    </div>
                 </div>
+
                 <div class="steps">
                     <strong>Детали операций:</strong>
                     {steps_html}
                 </div>
+
+                <script>
+                    window['opp_{idx}_data'] = {{
+                        initial: {opp['initial']},
+                        rates: {json.dumps([r['rate'] for r in rates])},
+                        pathParts: {json.dumps(path_parts)}
+                    }};
+                </script>
             </div>
 """
             html_content += """
         </div>
+"""
+
+        # JavaScript для пересчёта
+        html_content += """
+        <script>
+            function recalculate(oppId) {
+                const data = window['opp_' + oppId + '_data'];
+                const inputs = document.querySelectorAll(`input[data-opp-id="${oppId}"]`);
+
+                let amount = data.initial;
+                const rates = [];
+
+                inputs.forEach(input => {
+                    rates.push(parseFloat(input.value));
+                });
+
+                // Пересчитываем по цепочке
+                for (let i = 0; i < rates.length; i++) {
+                    if (i === 0) {
+                        // USDT -> Coin A
+                        amount = amount / rates[i];
+                    } else if (i === rates.length - 1) {
+                        // Last Coin -> USDT
+                        amount = amount * rates[i];
+                    } else {
+                        // Coin -> Coin
+                        amount = amount * rates[i];
+                    }
+                }
+
+                const profit = amount - data.initial;
+                const spread = ((amount - data.initial) / data.initial) * 100;
+
+                // Обновляем UI
+                document.getElementById('final-' + oppId).textContent = amount.toFixed(2);
+                document.getElementById('spread-' + oppId).textContent = spread.toFixed(4) + '%';
+                document.getElementById('profit-' + oppId).textContent = ' | Прибыль: $' + profit.toFixed(4);
+
+                // Меняем цвет в зависимости от прибыли
+                const spreadEl = document.getElementById('spread-' + oppId);
+                const profitEl = document.getElementById('profit-' + oppId);
+
+                if (spread > 0) {
+                    spreadEl.style.color = '#28a745';
+                    profitEl.style.color = '#28a745';
+                } else {
+                    spreadEl.style.color = '#dc3545';
+                    profitEl.style.color = '#dc3545';
+                }
+            }
+        </script>
 """
 
         # Предупреждения
@@ -326,6 +505,7 @@ class ResultsSaver:
         <div class="warning">
             <h3>⚠️ Важные замечания</h3>
             <ul>
+                <li>Вы можете изменить курсы обмена, чтобы актуализировать расчёты</li>
                 <li>Указанные спреды НЕ учитывают комиссии биржи (~0.1% за сделку)</li>
                 <li>Треугольный арбитраж: 3 сделки = ~0.3% комиссий</li>
                 <li>Четырехугольный арбитраж: 4 сделки = ~0.4% комиссий</li>
