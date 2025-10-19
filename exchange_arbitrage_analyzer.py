@@ -3,16 +3,15 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 
-class SimpleExchangeAnalyzer:
+class ExchangeArbitrageAnalyzer:
     """
-    Простой анализатор арбитража через один обменник
-    Схема: Bybit (купить A) → Exchange (обменять A→B) → Bybit (продать B)
+    Анализатор арбитража через обменники (BestChange)
+    Схема: Bybit (купить A) → BestChange (обменять A→B) → Bybit (продать B)
     """
 
-    def __init__(self, bybit_client, exchange_client, exchange_name: str):
+    def __init__(self, bybit_client, bestchange_client):
         self.bybit = bybit_client
-        self.exchange = exchange_client
-        self.exchange_name = exchange_name
+        self.bestchange = bestchange_client
         self.found_count = 0
         self.checked_pairs = 0
 
@@ -20,26 +19,38 @@ class SimpleExchangeAnalyzer:
             self,
             start_amount: float = 100.0,
             min_spread: float = 0.3,
-            max_pairs: int = 100,
-            parallel_requests: int = 10
+            max_spread: float = 50.0,
+            min_reserve: float = 0,
+            parallel_requests: int = 50
     ) -> List[Dict]:
         """
-        Ищет простые арбитражные связки через один обменник
+        Ищет арбитражные связки через обменники BestChange
+
+        Args:
+            start_amount: Начальная сумма в USDT
+            min_spread: Минимальный спред для фильтрации
+            max_spread: Максимальный спред (защита от аномалий)
+            min_reserve: Минимальный резерв обменника
+            parallel_requests: Количество параллельных проверок
         """
-        print(f"\n[{self.exchange_name}] 🔍 Начало поиска связок...")
-        print(f"[{self.exchange_name}] Параметры: ${start_amount}, мин. спред {min_spread}%")
-        print(f"[{self.exchange_name}] ⚡ Параллельных запросов: {parallel_requests}")
+        print(f"\n[BestChange Arbitrage] 🔍 Начало поиска связок...")
+        print(f"[BestChange Arbitrage] Параметры: ${start_amount}, спред {min_spread}%-{max_spread}%")
+        print(f"[BestChange Arbitrage] ⚡ Параллельных запросов: {parallel_requests}")
+        print(f"[BestChange Arbitrage] 💰 Мин. резерв обменника: ${min_reserve}")
 
         opportunities = []
 
-        # Находим общие монеты между Bybit и обменником
-        common_coins = self.exchange.get_common_currencies(self.bybit.coins)
+        # Находим общие монеты между Bybit и BestChange
+        bybit_coins = set(self.bybit.usdt_pairs.keys())
+        bestchange_coins = set(self.bestchange.crypto_currencies.keys())
+        common_coins = bybit_coins & bestchange_coins
 
         if not common_coins:
-            print(f"[{self.exchange_name}] ❌ Нет общих монет с Bybit")
+            print(f"[BestChange Arbitrage] ❌ Нет общих монет между Bybit и BestChange")
             return opportunities
 
-        common_coins_list = sorted(list(common_coins))[:max_pairs]
+        common_coins_list = sorted(list(common_coins))
+        print(f"[BestChange Arbitrage] ✓ Общих монет: {len(common_coins_list)}")
 
         # Создаём все возможные пары для проверки
         all_pairs = []
@@ -49,8 +60,8 @@ class SimpleExchangeAnalyzer:
                     all_pairs.append((coin_a, coin_b))
 
         total_pairs = len(all_pairs)
-        print(f"\n[{self.exchange_name}] 📦 Всего пар для проверки: {total_pairs}")
-        print(f"[{self.exchange_name}] 💡 Результаты выводятся по мере обнаружения...")
+        print(f"[BestChange Arbitrage] 📦 Всего пар для проверки: {total_pairs}")
+        print(f"[BestChange Arbitrage] 💡 Результаты выводятся по мере обнаружения...")
         print("=" * 100)
 
         self.checked_pairs = 0
@@ -62,7 +73,7 @@ class SimpleExchangeAnalyzer:
 
         for coin_a, coin_b in all_pairs:
             task = self._check_pair_with_semaphore(
-                semaphore, coin_a, coin_b, start_amount, min_spread
+                semaphore, coin_a, coin_b, start_amount, min_spread, max_spread, min_reserve
             )
             tasks.append(task)
 
@@ -73,14 +84,11 @@ class SimpleExchangeAnalyzer:
         for result in results:
             if isinstance(result, dict) and 'spread' in result:
                 opportunities.append(result)
-                self.found_count += 1
-                self._print_opportunity(result, self.found_count)
 
         print("=" * 100)
-        print(f"\n[{self.exchange_name}] ✅ Проверка завершена!")
-        print(f"[{self.exchange_name}] 📊 Проверено пар: {self.checked_pairs}")
-        print(f"[{self.exchange_name}] 🎯 Найдено связок: {self.found_count}")
-        print(f"[{self.exchange_name}] ❌ Недоступных пар: {self.exchange.get_failed_pairs_count()}")
+        print(f"\n[BestChange Arbitrage] ✅ Проверка завершена!")
+        print(f"[BestChange Arbitrage] 📊 Проверено пар: {self.checked_pairs}")
+        print(f"[BestChange Arbitrage] 🎯 Найдено связок: {len(opportunities)}")
 
         # Сортируем по спреду
         opportunities.sort(key=lambda x: x['spread'], reverse=True)
@@ -93,28 +101,38 @@ class SimpleExchangeAnalyzer:
             coin_a: str,
             coin_b: str,
             start_amount: float,
-            min_spread: float
+            min_spread: float,
+            max_spread: float,
+            min_reserve: float
     ):
         """Проверяет одну пару с ограничением параллелизма"""
         async with semaphore:
             self.checked_pairs += 1
 
-            # Показываем прогресс каждые 100 пар (компактно)
+            # Показываем прогресс каждые 100 пар
             if self.checked_pairs % 100 == 0:
-                print(f"[{self.exchange_name}] 📊 Прогресс: {self.checked_pairs}/9900 | Найдено: {self.found_count}")
+                print(f"[BestChange Arbitrage] 📊 Прогресс: {self.checked_pairs} | Найдено: {self.found_count}")
 
-            return await self._check_single_pair(coin_a, coin_b, start_amount, min_spread)
+            result = await self._check_single_pair(coin_a, coin_b, start_amount, min_spread, max_spread, min_reserve)
+
+            if result:
+                self.found_count += 1
+                self._print_opportunity(result, self.found_count)
+
+            return result
 
     async def _check_single_pair(
             self,
             coin_a: str,
             coin_b: str,
             start_amount: float,
-            min_spread: float
+            min_spread: float,
+            max_spread: float,
+            min_reserve: float
     ) -> Optional[Dict]:
         """
         Проверяет одну пару монет
-        Схема: USDT → CoinA (Bybit) → CoinB (Exchange) → USDT (Bybit)
+        Схема: USDT → CoinA (Bybit) → CoinB (BestChange) → USDT (Bybit)
         """
         try:
             # Шаг 1: USDT → CoinA на Bybit
@@ -124,29 +142,24 @@ class SimpleExchangeAnalyzer:
 
             amount_coin_a = start_amount / price_a_usdt
 
-            # Шаг 2: CoinA → CoinB на обменнике
-            pair_key = f"{coin_a}_{coin_b}"
+            # Шаг 2: CoinA → CoinB на BestChange (получаем лучший курс)
+            best_rate = self.bestchange.get_best_rate(coin_a, coin_b, min_reserve)
 
-            # Быстрая проверка кэша неудачных пар
-            if pair_key in self.exchange.failed_pairs:
+            if not best_rate:
                 return None
 
-            exchange_result = await self.exchange.get_estimated_amount(
-                from_currency=coin_a,
-                to_currency=coin_b,
-                from_amount=amount_coin_a
-            )
-
-            if not exchange_result or exchange_result.get('to_amount', 0) <= 0:
+            # Используем rankrate (учитывает комиссии)
+            exchange_rate = best_rate.rankrate
+            if exchange_rate <= 0:
                 return None
 
-            amount_coin_b = exchange_result['to_amount']
+            amount_coin_b = amount_coin_a * exchange_rate
 
-            # Проверяем адекватность курса
-            if amount_coin_b <= 0 or amount_coin_a <= 0:
+            # Проверяем лимиты обменника
+            if best_rate.give_min > 0 and amount_coin_a < best_rate.give_min:
                 return None
-
-            exchange_rate = amount_coin_b / amount_coin_a
+            if best_rate.give_max > 0 and amount_coin_a > best_rate.give_max:
+                return None
 
             # Шаг 3: CoinB → USDT на Bybit
             price_b_usdt = self.bybit.usdt_pairs.get(coin_b)
@@ -158,58 +171,57 @@ class SimpleExchangeAnalyzer:
             # Рассчитываем спред
             spread = ((final_usdt - start_amount) / start_amount) * 100
 
-            # Фильтруем нереалистичные спреды
-            if spread > 50.0 or spread < -50.0:
+            # Фильтруем по спреду
+            if spread < min_spread or spread > max_spread:
                 return None
 
-            # Дополнительная валидация (проверка адекватности курса)
-            expected_price_b = price_a_usdt / exchange_rate
-            price_deviation = abs(expected_price_b - price_b_usdt) / price_b_usdt * 100
-
-            if price_deviation > 100:  # Если отклонение больше 100%, что-то не так
+            # Дополнительная валидация (защита от аномалий)
+            if abs(spread) > 100:
                 return None
 
-            if spread >= min_spread:
-                return {
-                    'type': 'simple_exchange_arbitrage',
-                    'path': f"USDT → {coin_a} → {coin_b} → USDT",
-                    'scheme': f"Bybit → {self.exchange_name} → Bybit",
-                    'coins': [coin_a, coin_b],
-                    'exchange_used': self.exchange_name,
-                    'initial': start_amount,
-                    'final': final_usdt,
-                    'profit': final_usdt - start_amount,
-                    'spread': spread,
-                    'steps': [
-                        f"1️⃣  Купить {amount_coin_a:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (курс: ${price_a_usdt:.8f})",
-                        f"2️⃣  Перевести {amount_coin_a:.8f} {coin_a} с Bybit на {self.exchange_name}",
-                        f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} на {self.exchange_name} (курс: {exchange_rate:.8f})",
-                        f"4️⃣  Продать {amount_coin_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (курс: ${price_b_usdt:.8f})",
-                        f"✅ ИТОГ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{final_usdt - start_amount:.2f} USDT, {spread:.4f}%)"
-                    ],
-                    'exchange_rate': exchange_rate,
-                    'bybit_rate_a': price_a_usdt,
-                    'bybit_rate_b': price_b_usdt,
-                    'timestamp': datetime.now().isoformat()
-                }
+            return {
+                'type': 'bestchange_arbitrage',
+                'path': f"USDT → {coin_a} → {coin_b} → USDT",
+                'scheme': f"Bybit → BestChange → Bybit",
+                'coins': [coin_a, coin_b],
+                'initial': start_amount,
+                'final': final_usdt,
+                'profit': final_usdt - start_amount,
+                'spread': spread,
+                'exchanger': best_rate.exchanger,
+                'exchanger_id': best_rate.exchanger_id,
+                'reserve': best_rate.reserve,
+                'give_min': best_rate.give_min,
+                'give_max': best_rate.give_max,
+                'steps': [
+                    f"1️⃣  Купить {amount_coin_a:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (курс: ${price_a_usdt:.8f})",
+                    f"2️⃣  Перевести {amount_coin_a:.8f} {coin_a} с Bybit на обменник {best_rate.exchanger}",
+                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} на {best_rate.exchanger} (курс: {exchange_rate:.8f})",
+                    f"4️⃣  Перевести {amount_coin_b:.8f} {coin_b} с обменника на Bybit",
+                    f"5️⃣  Продать {amount_coin_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (курс: ${price_b_usdt:.8f})",
+                    f"✅ ИТОГ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{final_usdt - start_amount:.2f} USDT, {spread:.4f}%)"
+                ],
+                'exchange_rate': exchange_rate,
+                'bybit_rate_a': price_a_usdt,
+                'bybit_rate_b': price_b_usdt,
+                'timestamp': datetime.now().isoformat()
+            }
 
-            return None
-
-        except Exception as e:
-            # Тихо игнорируем ошибки
+        except Exception:
             return None
 
     def _print_opportunity(self, opp: Dict, rank: int):
         """Выводит найденную возможность сразу в консоль"""
-        print(f"\n🎯 НАЙДЕНА СВЯЗКА #{rank} через {self.exchange_name}")
+        print(f"\n🎯 НАЙДЕНА СВЯЗКА #{rank} через BestChange")
         print(f"   📍 Путь: {opp['path']}")
         print(f"   💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
+        print(f"   🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")
         print(f"   📊 Детальный расчёт:")
         print(f"      1️⃣  {opp['initial']:.2f} USDT → {opp['initial'] / opp['bybit_rate_a']:.8f} {opp['coins'][0]}")
         print(f"         (Bybit: 1 {opp['coins'][0]} = ${opp['bybit_rate_a']:.8f})")
         print(
             f"      2️⃣  {opp['initial'] / opp['bybit_rate_a']:.8f} {opp['coins'][0]} → {(opp['initial'] / opp['bybit_rate_a']) * opp['exchange_rate']:.8f} {opp['coins'][1]}")
-        print(f"         ({self.exchange_name}: 1 {opp['coins'][0]} = {opp['exchange_rate']:.8f} {opp['coins'][1]})")
+        print(f"         ({opp['exchanger']}: 1 {opp['coins'][0]} = {opp['exchange_rate']:.8f} {opp['coins'][1]})")
         print(
             f"      3️⃣  {(opp['initial'] / opp['bybit_rate_a']) * opp['exchange_rate']:.8f} {opp['coins'][1]} → {opp['final']:.2f} USDT")
         print(f"         (Bybit: 1 {opp['coins'][1]} = ${opp['bybit_rate_b']:.8f})")
@@ -220,10 +232,11 @@ class SimpleExchangeAnalyzer:
             self,
             coin_a: str,
             coin_b: str,
-            start_amount: float = 100.0
+            start_amount: float = 100.0,
+            min_reserve: float = 0
     ) -> Dict:
         """Анализирует конкретную пару монет"""
-        print(f"\n[{self.exchange_name}] 🔬 Детальный анализ пары {coin_a} → {coin_b}")
+        print(f"\n[BestChange Arbitrage] 🔬 Детальный анализ пары {coin_a} → {coin_b}")
 
         try:
             # Шаг 1: USDT → CoinA на Bybit
@@ -234,21 +247,24 @@ class SimpleExchangeAnalyzer:
             amount_coin_a = start_amount / price_a_usdt
             print(f"   1. {start_amount} USDT → {amount_coin_a:.8f} {coin_a} (Bybit: ${price_a_usdt:.8f})")
 
-            # Шаг 2: CoinA → CoinB на обменнике
-            print(f"   2. Запрос курса {coin_a} → {coin_b} на {self.exchange_name}...")
+            # Шаг 2: CoinA → CoinB на BestChange
+            print(f"   2. Запрос курса {coin_a} → {coin_b} на BestChange...")
 
-            exchange_result = await self.exchange.get_estimated_amount(
-                from_currency=coin_a,
-                to_currency=coin_b,
-                from_amount=amount_coin_a
-            )
+            # Получаем топ-5 обменников
+            top_rates = self.bestchange.get_top_rates(coin_a, coin_b, top_n=5, min_reserve=min_reserve)
 
-            if not exchange_result:
-                return {'error': f'{self.exchange_name} не поддерживает {coin_a} → {coin_b}'}
+            if not top_rates:
+                return {'error': f'BestChange не поддерживает {coin_a} → {coin_b}'}
 
-            amount_coin_b = exchange_result['to_amount']
-            exchange_rate = amount_coin_b / amount_coin_a
-            print(f"   ✓ {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} (курс: {exchange_rate:.8f})")
+            print(f"   ✓ Найдено {len(top_rates)} обменников:")
+            for idx, rate in enumerate(top_rates, 1):
+                amount_b = amount_coin_a * rate.rankrate
+                print(
+                    f"      {idx}. {rate.exchanger}: курс {rate.rankrate:.8f} → {amount_b:.8f} {coin_b} (резерв: ${rate.reserve:,.0f})")
+
+            # Используем лучший курс
+            best_rate = top_rates[0]
+            amount_coin_b = amount_coin_a * best_rate.rankrate
 
             # Шаг 3: CoinB → USDT на Bybit
             price_b_usdt = self.bybit.usdt_pairs.get(coin_b)
@@ -262,13 +278,21 @@ class SimpleExchangeAnalyzer:
             profit = final_usdt - start_amount
 
             print(f"\n   ✅ Итог: {spread:.4f}% ({'+' if profit >= 0 else ''}{profit:.2f} USDT)")
+            print(f"   🏦 Лучший обменник: {best_rate.exchanger}")
 
             return {
                 'success': True,
                 'spread': spread,
                 'profit': profit,
                 'final_usdt': final_usdt,
-                'exchange': self.exchange_name
+                'exchanger': best_rate.exchanger,
+                'top_exchangers': [
+                    {
+                        'name': r.exchanger,
+                        'rate': r.rankrate,
+                        'reserve': r.reserve
+                    } for r in top_rates
+                ]
             }
 
         except Exception as e:
