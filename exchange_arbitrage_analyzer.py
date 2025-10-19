@@ -192,6 +192,8 @@ class ExchangeArbitrageAnalyzer:
             if not best_rate:
                 return None
 
+            # exchange_rate показывает сколько ПОЛУЧИМ coin_b за 1 coin_a
+            # Это ПРЯМОЙ курс обмена (coin_a → coin_b)
             exchange_rate = best_rate.rankrate
             if exchange_rate <= 0:
                 return None
@@ -240,7 +242,7 @@ class ExchangeArbitrageAnalyzer:
                 'steps': [
                     f"1️⃣  Купить {amount_coin_a:.8f} {coin_a} за {start_amount:.2f} USDT на Bybit (${price_a_usdt:.8f})",
                     f"2️⃣  Перевести {amount_coin_a:.8f} {coin_a} с Bybit на {best_rate.exchanger}",
-                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} (курс: {exchange_rate:.8f})",
+                    f"3️⃣  Обменять {amount_coin_a:.8f} {coin_a} → {amount_coin_b:.8f} {coin_b} (курс: 1 {coin_a} = {exchange_rate:.8f} {coin_b})",
                     f"4️⃣  Перевести {amount_coin_b:.8f} {coin_b} с обменника на Bybit",
                     f"5️⃣  Продать {amount_coin_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (${price_b_usdt:.8f})",
                     f"✅ ИТОГ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{profit:.2f} USDT, {spread:.4f}%)"
@@ -312,7 +314,7 @@ class ExchangeArbitrageAnalyzer:
             for idx, rate in enumerate(top_rates, 1):
                 amount_b = amount_coin_a * rate.rankrate
                 print(
-                    f"      {idx}. {rate.exchanger}: курс {rate.rankrate:.8f} → {amount_b:.8f} {coin_b} (резерв: ${rate.reserve:,.0f})")
+                    f"      {idx}. {rate.exchanger}: курс 1 {coin_a} = {rate.rankrate:.8f} {coin_b} → {amount_b:.8f} {coin_b} (резерв: ${rate.reserve:,.0f})")
 
             # Используем лучший курс
             best_rate = top_rates[0]
