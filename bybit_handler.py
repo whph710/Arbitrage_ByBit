@@ -4,7 +4,7 @@ import json
 from typing import Dict, Set, Tuple, Optional, Callable
 from collections import deque
 from datetime import datetime
-from configs import (
+from configs_continuous import (
     BYBIT_API_URL, BYBIT_WS_URL, REQUEST_TIMEOUT, ENABLE_COIN_FILTER,
     BLACKLIST_COINS, WHITELIST_COINS, MIN_24H_VOLUME_USDT,
     MIN_LIQUIDITY_SCORE, USE_ONLY_TOP_LIQUID_COINS, WEBSOCKET_ENABLED,

@@ -2,7 +2,7 @@ import asyncio
 from typing import List, Dict, Optional
 from datetime import datetime
 from collections import defaultdict
-from configs import ENABLE_CACHE, CACHE_HOT_PAIRS, MIN_PROFIT_USD
+from configs_continuous import ENABLE_CACHE, CACHE_HOT_PAIRS, MIN_PROFIT_USD
 
 
 class ExchangeArbitrageAnalyzer:

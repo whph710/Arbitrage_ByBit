@@ -2,7 +2,7 @@ import aiohttp
 import asyncio
 from typing import Dict, Set, Optional, List, Tuple
 from dataclasses import dataclass
-from configs import (
+from configs_continuous import (
     BESTCHANGE_API_KEY,
     MAX_CONCURRENT_REQUESTS,
     REQUEST_DELAY,
