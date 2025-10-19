@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime
 from configs import START_AMOUNT, MIN_SPREAD, SHOW_TOP, MAX_REASONABLE_SPREAD
-from logs.bybit_handler import BybitClientAsync
+from bybit_handler import BybitClientAsync
 from results_saver import ResultsSaver
 
 
