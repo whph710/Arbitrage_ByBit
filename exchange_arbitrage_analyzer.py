@@ -27,7 +27,7 @@ class ExchangeArbitrageAnalyzer:
             min_spread: float = 0.3,
             max_spread: float = 50.0,
             min_reserve: float = 0,
-            parallel_requests: int = 500  # Увеличено для скорости
+            parallel_requests: int = 500
     ) -> List[Dict]:
         """
         Ищет арбитражные связки через обменники BestChange (ОПТИМИЗИРОВАНО)
@@ -60,7 +60,7 @@ class ExchangeArbitrageAnalyzer:
         for coin in common_coins:
             liquidity = self.bybit.get_liquidity_score(coin, 'USDT')
             volume = self.bybit.get_volume_24h(coin, 'USDT')
-            if liquidity >= 30:  # Только высоколиквидные
+            if liquidity >= 30:
                 liquid_coins.append((coin, liquidity, volume))
 
         # Сортируем по ликвидности
@@ -155,8 +155,9 @@ class ExchangeArbitrageAnalyzer:
                 pair_key = (coin_a, coin_b)
                 self.pair_performance[pair_key]['finds'] += 1
                 self.pair_performance[pair_key]['avg_spread'] = (
-                    self.pair_performance[pair_key]['avg_spread'] + result['spread']
-                ) / 2
+                                                                        self.pair_performance[pair_key]['avg_spread'] +
+                                                                        result['spread']
+                                                                ) / 2
 
             # Обновляем счётчик проверок
             pair_key = (coin_a, coin_b)
@@ -174,11 +175,11 @@ class ExchangeArbitrageAnalyzer:
             min_reserve: float
     ) -> Optional[Dict]:
         """
-        Проверяет одну пару монет (ОПТИМИЗИРОВАНО)
+        Проверяет одну пару монет (ПОЛНОСТЬЮ ИСПРАВЛЕНО)
         Схема: USDT → CoinA (Bybit) → CoinB (BestChange) → USDT (Bybit)
         """
         try:
-            # Быстрая проверка: есть ли цены?
+            # Получаем цены на Bybit
             price_a_usdt = self.bybit.usdt_pairs.get(coin_a)
             price_b_usdt = self.bybit.usdt_pairs.get(coin_b)
 
@@ -187,20 +188,46 @@ class ExchangeArbitrageAnalyzer:
             if not price_b_usdt or price_b_usdt <= 0:
                 return None
 
-            # Быстрая проверка: есть ли курс на BestChange?
+            # Получаем курс от BestChange
             best_rate = self.bestchange.get_best_rate(coin_a, coin_b, min_reserve)
             if not best_rate:
                 return None
 
-            # exchange_rate показывает сколько ПОЛУЧИМ coin_b за 1 coin_a
-            # Это ПРЯМОЙ курс обмена (coin_a → coin_b)
-            exchange_rate = best_rate.rankrate
+            raw_rate = best_rate.rankrate
+            if raw_rate <= 0:
+                return None
+
+            # КРИТИЧНАЯ ЛОГИКА: Определяем правильное направление курса
+            # BestChange может вернуть курс в любом направлении
+
+            # Вычисляем ожидаемый курс на основе цен Bybit
+            # Сколько coin_b получим за 1 coin_a
+            expected_rate = price_a_usdt / price_b_usdt
+
+            # Сравниваем с курсом от BestChange
+            # Если они сильно отличаются (> 50%), значит курс обратный
+            rate_ratio = raw_rate / expected_rate if expected_rate > 0 else 0
+
+            # Если отношение близко к 1 (0.5-2.0), курс правильный
+            # Если отношение далеко от 1, нужно инвертировать
+            if 0.5 <= rate_ratio <= 2.0:
+                # Курс в правильном направлении
+                exchange_rate = raw_rate
+            else:
+                # Курс обратный, инвертируем
+                exchange_rate = 1.0 / raw_rate if raw_rate > 0 else 0
+
             if exchange_rate <= 0:
                 return None
 
-            # Расчёт арбитража
+            # Расчёт арбитража с исправленным курсом
+            # Шаг 1: Покупаем coin_a за USDT на Bybit
             amount_coin_a = start_amount / price_a_usdt
+
+            # Шаг 2: Обмениваем coin_a на coin_b через BestChange
             amount_coin_b = amount_coin_a * exchange_rate
+
+            # Шаг 3: Продаём coin_b за USDT на Bybit
             final_usdt = amount_coin_b * price_b_usdt
 
             # Проверка лимитов обменника
@@ -209,18 +236,19 @@ class ExchangeArbitrageAnalyzer:
             if best_rate.give_max > 0 and amount_coin_a > best_rate.give_max:
                 return None
 
-            # Расчёт спреда и прибыли
-            spread = ((final_usdt - start_amount) / start_amount) * 100
+            # Расчёт прибыли и спреда
             profit = final_usdt - start_amount
+            spread = (profit / start_amount) * 100
 
             # Фильтрация
             if spread < min_spread or spread > max_spread:
                 return None
-            if abs(spread) > 100:  # Защита от аномалий
+            if abs(spread) > 100:
                 return None
-            if profit < MIN_PROFIT_USD:  # Минимальная прибыль в долларах
+            if profit < MIN_PROFIT_USD:
                 return None
 
+            # Возвращаем результат с ИСПРАВЛЕННЫМ курсом
             return {
                 'type': 'bestchange_arbitrage',
                 'path': f"USDT → {coin_a} → {coin_b} → USDT",
@@ -247,7 +275,10 @@ class ExchangeArbitrageAnalyzer:
                     f"5️⃣  Продать {amount_coin_b:.8f} {coin_b} за {final_usdt:.2f} USDT на Bybit (${price_b_usdt:.8f})",
                     f"✅ ИТОГ: {start_amount:.2f} USDT → {final_usdt:.2f} USDT (+{profit:.2f} USDT, {spread:.4f}%)"
                 ],
-                'exchange_rate': exchange_rate,
+                'exchange_rate': exchange_rate,  # ИСПРАВЛЕННЫЙ курс
+                'raw_bestchange_rate': raw_rate,
+                'expected_rate': expected_rate,
+                'rate_was_inverted': rate_ratio < 0.5 or rate_ratio > 2.0,
                 'bybit_rate_a': price_a_usdt,
                 'bybit_rate_b': price_b_usdt,
                 'timestamp': datetime.now().isoformat()
@@ -262,16 +293,17 @@ class ExchangeArbitrageAnalyzer:
         print(f"   📍 Путь: {opp['path']}")
         print(f"   💰 Спред: {opp['spread']:.4f}% | Прибыль: ${opp['profit']:.4f}")
         print(f"   🏦 Обменник: {opp['exchanger']} (резерв: ${opp['reserve']:,.0f})")
-        print(f"   💧 Ликвидность: {opp['coins'][0]} ({opp['liquidity_a']:.1f}) → {opp['coins'][1]} ({opp['liquidity_b']:.1f})")
+        print(
+            f"   💧 Ликвидность: {opp['coins'][0]} ({opp['liquidity_a']:.1f}) → {opp['coins'][1]} ({opp['liquidity_b']:.1f})")
+        if opp.get('rate_was_inverted'):
+            print(f"   ⚠️  Курс был инвертирован: {opp['raw_bestchange_rate']:.8f} → {opp['exchange_rate']:.8f}")
         print("-" * 100)
 
     def _update_hot_pairs_cache(self, opportunities: List[Dict]):
         """Обновляет кэш горячих пар"""
-        # Сортируем по прибыли
         sorted_opps = sorted(opportunities, key=lambda x: x['profit'], reverse=True)
-
-        # Берём топ пар
         self.hot_pairs_cache.clear()
+
         for opp in sorted_opps[:CACHE_HOT_PAIRS]:
             pair = tuple(opp['coins'])
             self.hot_pairs_cache[pair] = {
@@ -293,7 +325,6 @@ class ExchangeArbitrageAnalyzer:
         print(f"\n[BestChange Arbitrage] 🔬 Детальный анализ пары {coin_a} → {coin_b}")
 
         try:
-            # Шаг 1: USDT → CoinA на Bybit
             price_a_usdt = self.bybit.usdt_pairs.get(coin_a)
             if not price_a_usdt:
                 return {'error': f'Цена {coin_a} не найдена на Bybit'}
@@ -301,10 +332,7 @@ class ExchangeArbitrageAnalyzer:
             amount_coin_a = start_amount / price_a_usdt
             print(f"   1. {start_amount} USDT → {amount_coin_a:.8f} {coin_a} (Bybit: ${price_a_usdt:.8f})")
 
-            # Шаг 2: CoinA → CoinB на BestChange
             print(f"   2. Запрос курса {coin_a} → {coin_b} на BestChange...")
-
-            # Получаем топ-5 обменников
             top_rates = self.bestchange.get_top_rates(coin_a, coin_b, top_n=5, min_reserve=min_reserve)
 
             if not top_rates:
@@ -316,11 +344,9 @@ class ExchangeArbitrageAnalyzer:
                 print(
                     f"      {idx}. {rate.exchanger}: курс 1 {coin_a} = {rate.rankrate:.8f} {coin_b} → {amount_b:.8f} {coin_b} (резерв: ${rate.reserve:,.0f})")
 
-            # Используем лучший курс
             best_rate = top_rates[0]
             amount_coin_b = amount_coin_a * best_rate.rankrate
 
-            # Шаг 3: CoinB → USDT на Bybit
             price_b_usdt = self.bybit.usdt_pairs.get(coin_b)
             if not price_b_usdt:
                 return {'error': f'Цена {coin_b} не найдена на Bybit'}
@@ -341,11 +367,8 @@ class ExchangeArbitrageAnalyzer:
                 'final_usdt': final_usdt,
                 'exchanger': best_rate.exchanger,
                 'top_exchangers': [
-                    {
-                        'name': r.exchanger,
-                        'rate': r.rankrate,
-                        'reserve': r.reserve
-                    } for r in top_rates
+                    {'name': r.exchanger, 'rate': r.rankrate, 'reserve': r.reserve}
+                    for r in top_rates
                 ]
             }
 
@@ -365,7 +388,6 @@ class ExchangeArbitrageAnalyzer:
             'top_performers': []
         }
 
-        # Топ-10 самых успешных пар
         sorted_pairs = sorted(
             self.pair_performance.items(),
             key=lambda x: x[1]['finds'] / max(x[1]['checks'], 1),

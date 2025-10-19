@@ -181,78 +181,83 @@ class ResultsSaver:
     def _extract_rates_from_opportunity(self, opp: Dict) -> List[Dict]:
         """Извлекает курсы из возможности арбитража"""
         rates = []
+
+        # Для BestChange арбитража используем готовые данные
+        if opp['type'] == 'bestchange_arbitrage':
+            coin_a = opp['coins'][0] if len(opp['coins']) > 0 else 'UNKNOWN'
+            coin_b = opp['coins'][1] if len(opp['coins']) > 1 else 'UNKNOWN'
+
+            # Используем данные напрямую из opportunity
+            bybit_rate_a = opp.get('bybit_rate_a', 0)
+            exchange_rate = opp.get('exchange_rate', 0)
+            bybit_rate_b = opp.get('bybit_rate_b', 0)
+
+            rates = [
+                {'from': 'USDT', 'to': coin_a, 'rate': bybit_rate_a},
+                {'from': coin_a, 'to': coin_b, 'rate': exchange_rate},
+                {'from': coin_b, 'to': 'USDT', 'rate': bybit_rate_b}
+            ]
+
+            return rates
+
+        # Для треугольного и четырехугольного арбитража
         path_parts = opp['path'].split(' → ')
 
-        # Для треугольного арбитража: USDT → A → B → USDT
+        # Треугольный арбитраж: USDT → A → B → USDT
         if opp['type'] == 'triangular' and len(path_parts) == 4:
             coin_a = path_parts[1]
             coin_b = path_parts[2]
 
-            # Извлекаем курсы из steps
+            # Извлекаем курсы из steps с защитой от ошибок
             for step in opp['steps']:
-                if 'курс:' in step or '(' in step:
-                    if coin_a in step and 'USDT' in step and 'Купить' in step:
-                        # USDT -> A
-                        rate_str = step.split('$')[1].split(')')[0] if '$' in step else \
-                        step.split('курс:')[1].split(')')[0] if 'курс:' in step else '0'
-                        rates.append({
-                            'from': 'USDT',
-                            'to': coin_a,
-                            'rate': float(rate_str.strip())
-                        })
-                    elif coin_a in step and coin_b in step:
-                        # A -> B
-                        rate_str = step.split('курс:')[1].split(')')[0] if 'курс:' in step else '0'
-                        rates.append({
-                            'from': coin_a,
-                            'to': coin_b,
-                            'rate': float(rate_str.strip())
-                        })
-                    elif coin_b in step and 'USDT' in step and 'Продать' in step:
-                        # B -> USDT
-                        rate_str = step.split('$')[1].split(')')[0] if '$' in step else \
-                        step.split('курс:')[1].split(')')[0] if 'курс:' in step else '0'
-                        rates.append({
-                            'from': coin_b,
-                            'to': 'USDT',
-                            'rate': float(rate_str.strip())
-                        })
+                try:
+                    if 'Купить' in step and coin_a in step and 'USDT' in step:
+                        # USDT -> A: ищем цену после "по цене $"
+                        if 'по цене $' in step:
+                            rate_str = step.split('по цене $')[1].split(')')[0].strip()
+                            rates.append({'from': 'USDT', 'to': coin_a, 'rate': float(rate_str)})
 
-        # Для четырехугольного: USDT → A → B → C → USDT
+                    elif coin_a in step and coin_b in step and 'Обмен' in step:
+                        # A -> B: ищем курс после "(курс"
+                        if '(курс' in step or 'курс:' in step:
+                            rate_str = step.split('курс')[1].strip()
+                            if rate_str.startswith(':'):
+                                rate_str = rate_str[1:].strip()
+                            rate_str = rate_str.split(')')[0].strip()
+                            rates.append({'from': coin_a, 'to': coin_b, 'rate': float(rate_str)})
+
+                    elif 'Продать' in step and coin_b in step and 'USDT' in step:
+                        # B -> USDT: ищем цену после "по цене $"
+                        if 'по цене $' in step:
+                            rate_str = step.split('по цене $')[1].split(')')[0].strip()
+                            rates.append({'from': coin_b, 'to': 'USDT', 'rate': float(rate_str)})
+                except (ValueError, IndexError, AttributeError):
+                    # Если не удалось извлечь курс, пропускаем
+                    continue
+
+        # Четырехугольный арбитраж: USDT → A → B → C → USDT
         elif opp['type'] == 'quadrilateral' and len(path_parts) == 5:
-            coin_a = path_parts[1]
-            coin_b = path_parts[2]
-            coin_c = path_parts[3]
-
+            # Для четырехугольного используем упрощённый подход
+            # Извлекаем из шагов с обработкой ошибок
             for step in opp['steps']:
-                if 'Купить' in step and coin_a in step:
-                    rate_str = step.split('за')[1].split('USDT')[0].strip()
-                    rates.append({'from': 'USDT', 'to': coin_a, 'rate': float(opp['initial']) / float(
-                        step.split('Купить')[1].split(coin_a)[0].strip())})
-                elif coin_a in step and coin_b in step:
-                    rates.append({'from': coin_a, 'to': coin_b, 'rate': 0})  # Нужно извлечь
-                elif coin_b in step and coin_c in step:
-                    rates.append({'from': coin_b, 'to': coin_c, 'rate': 0})
-                elif 'Продать' in step and coin_c in step:
-                    rates.append({'from': coin_c, 'to': 'USDT', 'rate': 0})
-
-        # Для BestChange арбитража
-        elif opp['type'] == 'bestchange_arbitrage':
-            path_parts = opp['path'].split(' → ')
-            if len(path_parts) >= 3:
-                coin_a = path_parts[1]
-                coin_b = path_parts[2]
-
-                for step in opp['steps']:
-                    if 'Купить' in step and coin_a in step and '$' in step:
-                        rate_str = step.split('$')[1].split(')')[0]
-                        rates.append({'from': 'USDT', 'to': coin_a, 'rate': float(rate_str)})
-                    elif 'Обменять' in step and 'курс:' in step:
-                        rate_str = step.split('курс:')[1].split(')')[0]
-                        rates.append({'from': coin_a, 'to': coin_b, 'rate': float(rate_str)})
-                    elif 'Продать' in step and coin_b in step and '$' in step:
-                        rate_str = step.split('$')[1].split(')')[0]
-                        rates.append({'from': coin_b, 'to': 'USDT', 'rate': float(rate_str)})
+                try:
+                    if 'по цене $' in step:
+                        rate_str = step.split('по цене $')[1].split(')')[0].strip()
+                        # Определяем from и to из текста
+                        parts = step.split(' ')
+                        if 'Купить' in step:
+                            rates.append({'from': 'USDT', 'to': parts[1], 'rate': float(rate_str)})
+                        elif 'Продать' in step:
+                            coin = [p for p in parts if p.isupper() and len(p) <= 10][0]
+                            rates.append({'from': coin, 'to': 'USDT', 'rate': float(rate_str)})
+                    elif 'курс' in step:
+                        rate_str = step.split('курс')[1].strip()
+                        if rate_str.startswith(':'):
+                            rate_str = rate_str[1:].strip()
+                        rate_str = rate_str.split(')')[0].strip()
+                        rates.append({'from': 'A', 'to': 'B', 'rate': float(rate_str)})
+                except (ValueError, IndexError, AttributeError):
+                    continue
 
         return rates
 
