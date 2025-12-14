@@ -43,12 +43,15 @@ class BestChangeClientAsync:
         self.changers: Dict[int, Dict] = {}
         self.rates: Dict[str, Dict[str, List[RateInfo]]] = {}
 
-        # Настройки из конфига с валидацией
-        self.max_concurrent_requests = max(1, min(MAX_CONCURRENT_REQUESTS, 10))
-        self.request_delay = max(0.1, REQUEST_DELAY)
-        self.batch_size = max(1, min(BATCH_SIZE, 500))
+        # Настройки из конфига с валидацией (оптимизировано для скорости)
+        # Увеличено до 20 параллельных запросов для ускорения
+        self.max_concurrent_requests = max(1, min(MAX_CONCURRENT_REQUESTS, 20))
+        # Уменьшена минимальная задержка до 0.05 для ускорения
+        self.request_delay = max(0.05, REQUEST_DELAY)
+        # Уменьшен размер батча до 25 для избежания таймаутов
+        self.batch_size = max(1, min(BATCH_SIZE, 25))
         self.max_retries = max(1, MAX_RETRIES)
-        self.retry_delay = max(1, RETRY_DELAY)
+        self.retry_delay = max(0.5, RETRY_DELAY)
 
         self.session: Optional[aiohttp.ClientSession] = None
         self.timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
@@ -70,12 +73,15 @@ class BestChangeClientAsync:
         await self.close()
 
     async def create_session(self):
-        """Создает HTTP сессию с оптимизированными настройками"""
+        """Создает HTTP сессию с оптимизированными настройками для скорости"""
         if self.session is None:
+            # Оптимизировано: увеличены лимиты соединений для параллельной обработки
             connector = aiohttp.TCPConnector(
-                limit=self.max_concurrent_requests,
-                limit_per_host=self.max_concurrent_requests,
-                ttl_dns_cache=300
+                limit=self.max_concurrent_requests * 2,  # Увеличено для параллелизма
+                limit_per_host=self.max_concurrent_requests * 2,
+                ttl_dns_cache=300,
+                force_close=False,  # Переиспользование соединений
+                enable_cleanup_closed=True
             )
             self.session = aiohttp.ClientSession(
                 connector=connector,
@@ -85,7 +91,8 @@ class BestChangeClientAsync:
                     'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/2.0)',
                     'Connection': 'keep-alive'
                 },
-                timeout=self.timeout
+                timeout=self.timeout,
+                read_bufsize=65536  # Увеличен буфер для быстрого чтения
             )
 
     async def close(self):
@@ -105,7 +112,7 @@ class BestChangeClientAsync:
         self._last_request_time = asyncio.get_event_loop().time()
 
     async def _make_request(self, endpoint: str, retries: int = None) -> Optional[Dict]:
-        """Выполняет HTTP запрос к API с улучшенной обработкой ошибок"""
+        """Выполняет HTTP запрос к API с улучшенной обработкой ошибок и оптимизацией"""
         if self.session is None:
             await self.create_session()
 
@@ -119,7 +126,9 @@ class BestChangeClientAsync:
                 await self._rate_limit_wait()
                 self.request_count += 1
 
-                async with self.session.get(url) as response:
+                # Оптимизировано: увеличен таймаут для больших запросов
+                timeout = aiohttp.ClientTimeout(total=self.timeout.total, connect=10)
+                async with self.session.get(url, timeout=timeout) as response:
                     if response.status == 429:
                         self.rate_limit_count += 1
                         wait_time = self.retry_delay * (2 ** attempt) * (0.5 + 0.5 * (attempt / retries))
@@ -295,11 +304,16 @@ class BestChangeClientAsync:
                 if result:
                     successful += 1
 
-                if completed % 5 == 0 or completed == len(tasks):
+                # Более частый вывод прогресса для лучшей визуализации
+                if completed % 3 == 0 or completed == len(tasks):
                     progress = completed * 100 // len(tasks)
-                    print(f"[BestChange] 📊 Прогресс: {completed}/{len(tasks)} ({progress}%) | Успешно: {successful}")
+                    bar_length = 30
+                    filled = int(bar_length * completed / len(tasks))
+                    bar = '█' * filled + '░' * (bar_length - filled)
+                    print(f"[BestChange] 📊 [{bar}] {completed}/{len(tasks)} ({progress}%) | ✅ {successful}")
 
-                await asyncio.sleep(self.request_delay)
+                # Уменьшена задержка между задачами
+                await asyncio.sleep(self.request_delay * 0.5)
                 return result
 
         results = await asyncio.gather(*[bounded_task(t) for t in tasks], return_exceptions=True)
@@ -373,8 +387,9 @@ class BestChangeClientAsync:
                 batch = pair_list[i:i + self.batch_size]
                 pair_string = '+'.join(batch)
 
+                # Уменьшена задержка между батчами для ускорения
                 if i > 0:
-                    await asyncio.sleep(self.request_delay * 0.3)
+                    await asyncio.sleep(self.request_delay * 0.1)
 
                 rates_data = await self._make_request(f"rates/{pair_string}")
 

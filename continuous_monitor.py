@@ -12,12 +12,13 @@ import traceback
 
 from configs_continuous import (
     START_AMOUNT, MIN_SPREAD, MAX_REASONABLE_SPREAD,
-    MONITORING_INTERVAL, MIN_PROFIT_USD
+    MONITORING_INTERVAL, MIN_PROFIT_USD, validate_config
 )
 from bybit_handler import BybitClientAsync
 from bestchange_handler import BestChangeClientAsync
 from exchange_arbitrage_analyzer import ExchangeArbitrageAnalyzer
 from opportunity_logger import OpportunityLogger
+from telegram_notifier import get_notifier
 
 
 class ContinuousArbitrageMonitor:
@@ -32,6 +33,7 @@ class ContinuousArbitrageMonitor:
         self.bestchange: Optional[BestChangeClientAsync] = None
         self.analyzer: Optional[ExchangeArbitrageAnalyzer] = None
         self.logger = OpportunityLogger()
+        self.telegram = get_notifier()
 
         # Статистика
         self.total_iterations = 0
@@ -62,6 +64,13 @@ class ContinuousArbitrageMonitor:
         print("=" * 100)
         print("🚀 ИНИЦИАЛИЗАЦИЯ НЕПРЕРЫВНОГО МОНИТОРИНГА АРБИТРАЖА")
         print("=" * 100)
+
+        # Валидация конфигурации
+        try:
+            validate_config()
+        except ValueError as e:
+            print(f"\n❌ Ошибка конфигурации: {e}")
+            return False
 
         try:
             # Создаем клиенты
@@ -206,6 +215,11 @@ class ContinuousArbitrageMonitor:
 
         # Логируем в файл
         self.logger.log_opportunity(opp)
+        
+        # Отправляем в Telegram (только если спред выше порога или это рекорд)
+        min_spread_for_telegram = MIN_SPREAD * 2  # Отправляем только лучшие возможности
+        if opp['spread'] >= min_spread_for_telegram or opp['spread'] > self.best_spread_ever:
+            asyncio.create_task(self.telegram.send_opportunity(opp, self.total_opportunities_found))
 
         # Обновляем лучшую находку
         if opp['spread'] > self.best_spread_ever:
@@ -213,6 +227,8 @@ class ContinuousArbitrageMonitor:
             self.best_opportunity_ever = opp
             print(f"🏆 НОВЫЙ РЕКОРД! Лучший спред за всё время: {self.best_spread_ever:.4f}%\n")
             self.logger.log_text(f"🏆 НОВЫЙ РЕКОРД: {self.best_spread_ever:.4f}% - {opp['path']}")
+            # Отправляем рекорд в Telegram
+            asyncio.create_task(self.telegram.send_opportunity(opp, self.total_opportunities_found))
 
     async def run_single_iteration(self):
         """Выполняет одну итерацию поиска"""

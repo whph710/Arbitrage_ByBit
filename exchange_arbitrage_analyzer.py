@@ -1,8 +1,10 @@
 import asyncio
+import math
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 from configs_continuous import ENABLE_CACHE, CACHE_HOT_PAIRS, MIN_PROFIT_USD
+from utils import is_valid_number, validate_price, validate_rate, TTLCache, MemoizedCalculator
 
 
 class ExchangeArbitrageAnalyzer:
@@ -25,9 +27,15 @@ class ExchangeArbitrageAnalyzer:
         self.found_count = 0
         self.checked_pairs = 0
 
-        # Кэширование "горячих" пар
-        self.hot_pairs_cache = {}
+        # Кэширование "горячих" пар с TTL и ограничением размера
+        self.hot_pairs_cache = TTLCache(max_size=CACHE_HOT_PAIRS, ttl_seconds=600)  # 10 минут TTL
         self.pair_performance = defaultdict(lambda: {'checks': 0, 'finds': 0, 'avg_spread': 0})
+        
+        # Мемоизация для частых расчетов
+        self.calculator = MemoizedCalculator(cache_size=500, ttl_seconds=60)
+        
+        # Кэш для результатов проверки пар (избегаем повторных проверок)
+        self.pair_check_cache = TTLCache(max_size=1000, ttl_seconds=30)  # 30 секунд TTL
 
     def _get_bybit_trade_url(self, coin: str, quote: str = 'USDT') -> str:
         """Генерирует ссылку на торговую пару Bybit"""
@@ -47,7 +55,7 @@ class ExchangeArbitrageAnalyzer:
 
     def _calculate_bybit_fees(self, amount: float, is_taker: bool = True) -> tuple:
         """
-        Рассчитывает комиссии Bybit
+        Рассчитывает комиссии Bybit с мемоизацией
 
         Args:
             amount: Сумма сделки
@@ -56,10 +64,12 @@ class ExchangeArbitrageAnalyzer:
         Returns:
             (сумма_комиссии, сумма_после_комиссии)
         """
+        # Валидация входных данных
+        if not is_valid_number(amount):
+            return (0.0, 0.0)
+        
         fee_rate = self.BYBIT_TAKER_FEE if is_taker else self.BYBIT_MAKER_FEE
-        fee_amount = amount * fee_rate
-        amount_after_fee = amount - fee_amount
-        return fee_amount, amount_after_fee
+        return self.calculator.calculate_fee(amount, fee_rate)
 
     def _get_withdrawal_fee_in_usdt(self, coin: str, amount: float, price_usdt: float) -> tuple:
         """
@@ -148,15 +158,18 @@ class ExchangeArbitrageAnalyzer:
             print(f"[BestChange Arbitrage] ❌ Нет общих монет между Bybit и BestChange")
             return opportunities
 
-        # Фильтруем только самые ликвидные монеты
+        # Фильтруем только самые ликвидные монеты (оптимизировано)
         liquid_coins = []
         for coin in common_coins:
             liquidity = self.bybit.get_liquidity_score(coin, 'USDT')
+            # Ранний выход - пропускаем неликвидные монеты
+            if liquidity < 30:
+                continue
+            
             volume = self.bybit.get_volume_24h(coin, 'USDT')
-            if liquidity >= 30:
-                liquid_coins.append((coin, liquidity, volume))
+            liquid_coins.append((coin, liquidity, volume))
 
-        # Сортируем по ликвидности
+        # Оптимизированная сортировка - только по ликвидности
         liquid_coins.sort(key=lambda x: x[1], reverse=True)
         common_coins_list = [coin for coin, _, _ in liquid_coins]
 
@@ -165,20 +178,32 @@ class ExchangeArbitrageAnalyzer:
 
         # Создаём все возможные пары
         all_pairs = []
+        all_pairs_set = set()  # Для быстрой проверки наличия
 
         # Сначала проверяем кэшированные "горячие" пары
-        if ENABLE_CACHE and self.hot_pairs_cache:
-            hot_pairs = list(self.hot_pairs_cache.keys())
-            print(f"[BestChange Arbitrage] 🔥 Приоритет для {len(hot_pairs)} горячих пар")
-            all_pairs.extend(hot_pairs)
+        if ENABLE_CACHE:
+            # Очищаем истекшие записи
+            self.hot_pairs_cache.cleanup_expired()
+            self.calculator.cleanup()
+            
+            # Получаем актуальные горячие пары
+            hot_pairs = self.get_hot_pairs()
+            
+            if hot_pairs:
+                print(f"[BestChange Arbitrage] 🔥 Приоритет для {len(hot_pairs)} горячих пар")
+                for pair in hot_pairs:
+                    if pair not in all_pairs_set:
+                        all_pairs.append(pair)
+                        all_pairs_set.add(pair)
 
-        # Добавляем остальные пары
+        # Добавляем остальные пары (оптимизировано - используем set для быстрой проверки)
         for coin_a in common_coins_list:
             for coin_b in common_coins_list:
                 if coin_a != coin_b:
                     pair = (coin_a, coin_b)
-                    if pair not in all_pairs:
+                    if pair not in all_pairs_set:
                         all_pairs.append(pair)
+                        all_pairs_set.add(pair)
 
         total_pairs = len(all_pairs)
         print(f"[BestChange Arbitrage] 📦 Всего пар для проверки: {total_pairs}")
@@ -188,7 +213,8 @@ class ExchangeArbitrageAnalyzer:
         self.checked_pairs = 0
         self.found_count = 0
 
-        # Массово-параллельная обработка
+        # Массово-параллельная обработка (оптимизировано)
+        # Используем батчинг для лучшей производительности
         semaphore = asyncio.Semaphore(parallel_requests)
         tasks = []
 
@@ -198,8 +224,14 @@ class ExchangeArbitrageAnalyzer:
             )
             tasks.append(task)
 
-        # Запускаем все задачи параллельно
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Оптимизировано: запускаем задачи батчами для лучшего контроля
+        batch_size = min(parallel_requests, 100)  # Обрабатываем по 100 задач за раз
+        results = []
+        
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i + batch_size]
+            batch_results = await asyncio.gather(*batch, return_exceptions=True)
+            results.extend(batch_results)
 
         # Собираем результаты
         for result in results:
@@ -272,15 +304,26 @@ class ExchangeArbitrageAnalyzer:
         Схема: USDT → CoinA (Bybit + trade fee) → CoinB (BestChange) → USDT (Bybit + trade fee)
 
         НОВОЕ: Учитываются комиссии на вывод (withdrawal fees)
+        ОПТИМИЗИРОВАНО: Добавлена валидация данных, кэширование, ранний выход
         """
+        # Проверяем кэш результатов (избегаем повторных проверок)
+        cache_key = f"{coin_a}_{coin_b}_{start_amount:.2f}_{min_reserve:.2f}"
+        cached_result = self.pair_check_cache.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+        
         try:
-            # Получаем цены на Bybit
+            # Валидация входных параметров
+            if not is_valid_number(start_amount) or start_amount <= 0:
+                return None
+            
+            # Получаем цены на Bybit с валидацией
             price_a_usdt = self.bybit.usdt_pairs.get(coin_a)
             price_b_usdt = self.bybit.usdt_pairs.get(coin_b)
 
-            if not price_a_usdt or price_a_usdt <= 0:
+            if not validate_price(price_a_usdt, f"цена {coin_a}"):
                 return None
-            if not price_b_usdt or price_b_usdt <= 0:
+            if not validate_price(price_b_usdt, f"цена {coin_b}"):
                 return None
 
             # Получаем курс от BestChange
@@ -289,20 +332,29 @@ class ExchangeArbitrageAnalyzer:
                 return None
 
             give_rate = best_rate.rankrate
-            if give_rate <= 0:
+            if not validate_rate(give_rate, f"курс {coin_a}→{coin_b}"):
                 return None
 
             # Инвертируем для получения правильного курса обмена
             exchange_rate = 1.0 / give_rate
 
-            if exchange_rate <= 0:
+            if not validate_rate(exchange_rate, f"обменный курс {coin_a}→{coin_b}"):
                 return None
 
             # === РАСЧЁТ С УЧЁТОМ ВСЕХ КОМИССИЙ BYBIT ===
 
             # Шаг 1: Покупаем coin_a за USDT на Bybit (Taker 0.18%)
             amount_coin_a_gross = start_amount / price_a_usdt
+            
+            # Валидация результата деления
+            if not is_valid_number(amount_coin_a_gross):
+                return None
+            
             fee_buy, amount_coin_a = self._calculate_bybit_fees(amount_coin_a_gross, is_taker=True)
+            
+            # Валидация результатов расчета комиссии
+            if not is_valid_number(amount_coin_a) or amount_coin_a <= 0:
+                return None
 
             # Шаг 2: Выводим coin_a с Bybit (withdrawal fee)
             withdraw_fee_a_coin, withdraw_fee_a_usdt, withdraw_chain_a = self._get_withdrawal_fee_in_usdt(
@@ -314,7 +366,11 @@ class ExchangeArbitrageAnalyzer:
                 return None
 
             # Шаг 3: Обмениваем coin_a на coin_b через BestChange (без комиссии от нас)
-            amount_coin_b = amount_coin_a_after_withdraw * exchange_rate
+            amount_coin_b = self.calculator.convert_amount(amount_coin_a_after_withdraw, exchange_rate)
+            
+            # Валидация результата конвертации
+            if not is_valid_number(amount_coin_b) or amount_coin_b <= 0:
+                return None
 
             # Шаг 4: Вносим coin_b на Bybit (обычно без комиссии, но проверим минимум)
             # Deposit обычно бесплатный, но учитываем минимальную сумму вывода с обменника
@@ -322,8 +378,17 @@ class ExchangeArbitrageAnalyzer:
             # Шаг 5: Выводим coin_b с обменника на Bybit (может быть комиссия обменника, но обычно включена в курс)
 
             # Шаг 6: Продаём coin_b за USDT на Bybit (Taker 0.18%)
-            usdt_gross = amount_coin_b * price_b_usdt
+            usdt_gross = self.calculator.convert_amount(amount_coin_b, price_b_usdt)
+            
+            # Валидация
+            if not is_valid_number(usdt_gross) or usdt_gross <= 0:
+                return None
+            
             fee_sell, usdt_after_sell = self._calculate_bybit_fees(usdt_gross, is_taker=True)
+            
+            # Валидация
+            if not is_valid_number(usdt_after_sell) or usdt_after_sell <= 0:
+                return None
 
             # Шаг 7: Выводим USDT с Bybit (withdrawal fee) - НЕ УЧИТЫВАЕМ, т.к. конечный результат в USDT на Bybit
             # Если бы выводили USDT, то нужно было бы вычесть комиссию
@@ -340,9 +405,22 @@ class ExchangeArbitrageAnalyzer:
             if best_rate.give_max > 0 and amount_coin_a_after_withdraw > best_rate.give_max:
                 return None
 
-            # Расчёт прибыли и спреда
+            # Расчёт прибыли и спреда с валидацией
             profit = final_usdt - start_amount
+            
+            # Валидация прибыли
+            if not is_valid_number(profit):
+                return None
+            
+            # Проверка деления на ноль
+            if start_amount <= 0:
+                return None
+            
             spread = (profit / start_amount) * 100
+            
+            # Валидация спреда
+            if not is_valid_number(spread) or math.isnan(spread) or math.isinf(spread):
+                return None
 
             # Фильтрация
             if spread < min_spread or spread > max_spread:
@@ -409,8 +487,16 @@ class ExchangeArbitrageAnalyzer:
                 'bybit_rate_b': price_b_usdt,
                 'timestamp': datetime.now().isoformat()
             }
+            
+            # Сохраняем в кэш перед возвратом
+            self.pair_check_cache.put(cache_key, result)
+            return result
 
+        except (ZeroDivisionError, ValueError, TypeError, KeyError) as e:
+            # Специфичная обработка известных ошибок
+            return None
         except Exception:
+            # Общая обработка остальных ошибок
             return None
 
     def _print_opportunity(self, opp: Dict, rank: int):
@@ -432,19 +518,35 @@ class ExchangeArbitrageAnalyzer:
         print("-" * 100)
 
     def _update_hot_pairs_cache(self, opportunities: List[Dict]):
-        """Обновляет кэш горячих пар"""
-        sorted_opps = sorted(opportunities, key=lambda x: x['profit'], reverse=True)
-        self.hot_pairs_cache.clear()
+        """Обновляет кэш горячих пар с TTL"""
+        if not opportunities:
+            return
+        
+        # Оптимизированная сортировка - только по прибыли
+        sorted_opps = sorted(opportunities, key=lambda x: x.get('profit', 0), reverse=True)
+        
+        # Очищаем старые записи
+        self.hot_pairs_cache.cleanup_expired()
 
+        # Добавляем новые горячие пары
+        added_count = 0
         for opp in sorted_opps[:CACHE_HOT_PAIRS]:
+            if 'coins' not in opp or len(opp['coins']) < 2:
+                continue
+            
             pair = tuple(opp['coins'])
-            self.hot_pairs_cache[pair] = {
-                'last_spread': opp['spread'],
-                'last_profit': opp['profit'],
+            # Сохраняем как строку для удобства
+            cache_key = f"({pair[0]}, {pair[1]})"
+            cache_data = {
+                'last_spread': opp.get('spread', 0),
+                'last_profit': opp.get('profit', 0),
                 'last_check': datetime.now()
             }
+            
+            self.hot_pairs_cache.put(cache_key, cache_data)
+            added_count += 1
 
-        print(f"\n[Cache] 🔥 Обновлён кэш: {len(self.hot_pairs_cache)} горячих пар")
+        print(f"\n[Cache] 🔥 Обновлён кэш: {added_count} горячих пар (размер кэша: {self.hot_pairs_cache.size()})")
 
     async def analyze_specific_pair(
             self,
@@ -522,7 +624,41 @@ class ExchangeArbitrageAnalyzer:
 
     def get_hot_pairs(self) -> List[tuple]:
         """Возвращает список горячих пар из кэша"""
-        return list(self.hot_pairs_cache.keys())
+        # Очищаем истекшие записи
+        self.hot_pairs_cache.cleanup_expired()
+        
+        hot_pairs = []
+        hot_pairs_set = set()  # Для быстрой проверки дубликатов
+        
+        # Проходим по всем ключам в кэше
+        for key in list(self.hot_pairs_cache.cache.keys()):
+            cached_data = self.hot_pairs_cache.get(key)
+            if cached_data is not None:
+                try:
+                    pair = None
+                    
+                    # Ключ хранится как строка вида "(coin_a, coin_b)"
+                    if isinstance(key, str):
+                        key = key.strip()
+                        if key.startswith('(') and key.endswith(')'):
+                            # Убираем скобки и разбиваем
+                            content = key[1:-1].strip()
+                            parts = [p.strip().strip("'\"") for p in content.split(',')]
+                            if len(parts) == 2:
+                                pair = (parts[0], parts[1])
+                    elif isinstance(key, tuple) and len(key) == 2:
+                        # Если ключ уже tuple
+                        pair = key
+                    
+                    # Добавляем если валидная пара и еще не добавлена
+                    if pair and isinstance(pair, tuple) and len(pair) == 2:
+                        if pair not in hot_pairs_set:
+                            hot_pairs.append(pair)
+                            hot_pairs_set.add(pair)
+                except Exception:
+                    continue
+        
+        return hot_pairs
 
     def get_pair_statistics(self) -> Dict:
         """Возвращает статистику по парам"""

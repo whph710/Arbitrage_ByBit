@@ -40,19 +40,23 @@ USE_ONLY_TOP_LIQUID_COINS = int(os.getenv("USE_ONLY_TOP_LIQUID_COINS", 200))
 # ============================================================================
 # Количество параллельных запросов к BestChange
 # Больше = быстрее, но выше нагрузка
-MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 100))
+# Оптимизировано: увеличено до 20 для ускорения загрузки
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 20))
 
 # Задержка между запросами (секунды)
 # Меньше = быстрее, но риск rate limit
+# Оптимизировано: уменьшено до 0.05 для ускорения
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", 0.05))
 
 # Размер батча для групповых запросов
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", 200))
+# Оптимизировано: уменьшено до 25 для избежания таймаутов
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", 25))
 
 # Повторные попытки при ошибках
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 3))
 RETRY_DELAY = float(os.getenv("RETRY_DELAY", 0.5))
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 30))
+# Оптимизировано: увеличен таймаут до 60 секунд для больших запросов
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 60))
 
 # ============================================================================
 # КЭШИРОВАНИЕ ДЛЯ УСКОРЕНИЯ
@@ -152,5 +156,47 @@ def print_config_summary():
     print(f"   • BestChange: {'✅ Задан' if BESTCHANGE_API_KEY else '❌ НЕ ЗАДАН (КРИТИЧНО!)'}")
     print("="*100 + "\n")
 
+def validate_config():
+    """Проверяет корректность конфигурации"""
+    errors = []
+    warnings = []
+    
+    if START_AMOUNT <= 0:
+        errors.append("START_AMOUNT должен быть > 0")
+    
+    if MIN_SPREAD < 0:
+        errors.append("MIN_SPREAD должен быть >= 0")
+    
+    if MONITORING_INTERVAL < 1:
+        errors.append("MONITORING_INTERVAL должен быть >= 1 секунды")
+    
+    if not BESTCHANGE_API_KEY:
+        errors.append("BESTCHANGE_API_KEY обязателен для работы бота!")
+    
+    if MAX_CONCURRENT_REQUESTS > 1000:
+        warnings.append("MAX_CONCURRENT_REQUESTS > 1000 может привести к rate limiting")
+    
+    if REQUEST_DELAY < 0.01:
+        warnings.append("REQUEST_DELAY < 0.01 может привести к блокировке API")
+    
+    if errors:
+        print("\n❌ КРИТИЧЕСКИЕ ОШИБКИ КОНФИГУРАЦИИ:")
+        for error in errors:
+            print(f"   • {error}")
+        raise ValueError("Исправьте ошибки конфигурации перед запуском")
+    
+    if warnings:
+        print("\n⚠️  ПРЕДУПРЕЖДЕНИЯ КОНФИГУРАЦИИ:")
+        for warning in warnings:
+            print(f"   • {warning}")
+    
+    return True
+
+
 if __name__ == "__main__":
     print_config_summary()
+    try:
+        validate_config()
+        print("✅ Конфигурация валидна")
+    except ValueError as e:
+        print(f"\n❌ {e}")
